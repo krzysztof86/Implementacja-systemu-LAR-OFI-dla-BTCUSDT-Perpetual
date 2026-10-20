@@ -1,0 +1,22 @@
+# Copy to e.g. my_config.toml and pass with: lar-ofi --config my_config.toml ...
+# Only keys you set override the packaged defaults (src/lar_ofi/default_config.toml).
+
+[costs]
+# Your OWN Bybit account parameters, in basis points (1 bp = 0.01%).
+# Leave commented out if unknown: the system will then make NO profitability claims.
+# taker_fee_bps = 
+# maker_fee_bps = 
+# spread_bps = 
+# slippage_bps = 
+# funding_cost_bps_if_crossed = 
+# funding_times_utc = ["00:00", "08:00", "16:00"]   # verify for your contract before using
+
+[evaluation]
+# Moves smaller than this (in bps) count as NEUTRAL. Required to score predictions
+# when no cost model is configured. Decide it BEFORE collecting outcomes.
+# neutral_band_bps = 
+# Chronological split: predictions recorded at/after this time form the TEST segment.
+# test_start_utc = "2026-11-01T00:00:00Z"
+
+[freshness]
+# stale_policy = "block"

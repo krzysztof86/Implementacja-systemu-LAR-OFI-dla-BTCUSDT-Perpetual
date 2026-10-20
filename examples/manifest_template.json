@@ -1,0 +1,26 @@
+{
+  "manifest_version": 1,
+  "instrument": "BTCUSDT",
+  "exchange": "Bybit",
+  "contract_type": "USDT_PERPETUAL",
+  "source_platform": "OpenMarket.xyz",
+  "data_source_config": "WPISZ: które giełdy agreguje każdy wskaźnik 'Agg.' w Twoim workspace",
+  "analysis_timeframe": "5M",
+  "regime_tag": null,
+  "screenshots": [
+    {"file": "ctx_4h.png", "timeframe": "4H", "indicators": ["Agg. TPO"],
+     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:00Z", "data_last_update_utc": "2026-10-20T09:58:58Z",
+     "notes": ""},
+    {"file": "auction_30m.png", "timeframe": "30M", "indicators": ["Agg. TPO", "Agg. Session Volume Profile", "Anchored VWAP"],
+     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:30Z", "data_last_update_utc": "2026-10-20T09:59:29Z",
+     "notes": "AVWAP anchor: WPISZ"},
+    {"file": "heat_5m_earlier.png", "timeframe": "5M", "indicators": ["Agg. Order Book Heatmap"],
+     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:55:00Z", "data_last_update_utc": "2026-10-20T09:54:59Z"},
+    {"file": "heat_5m_now.png", "timeframe": "5M", "indicators": ["Agg. Order Book Heatmap"],
+     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:40Z", "data_last_update_utc": "2026-10-20T09:59:39Z"},
+    {"file": "flow_5m.png", "timeframe": "5M", "indicators": ["Agg. Volume Footprint", "Agg. Open Interest", "Agg. CVD"],
+     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:45Z", "data_last_update_utc": "2026-10-20T09:59:44Z"},
+    {"file": "conf_1m.png", "timeframe": "1M", "indicators": ["Agg. Liquidations", "Absorption"],
+     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:50Z", "data_last_update_utc": "2026-10-20T09:59:49Z"}
+  ]
+}

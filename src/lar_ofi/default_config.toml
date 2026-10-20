@@ -1,0 +1,77 @@
+# LAR-OFI default configuration.
+#
+# Every numeric threshold below is a PROJECT ASSUMPTION or a USER POLICY.
+# None of them has been calibrated on data. Do not tune them on the same
+# sample that is later reported as an independent test.
+
+[instrument]
+symbol = "BTCUSDT"
+exchange = "Bybit"
+contract_type = "USDT_PERPETUAL"
+
+[timeframes]
+context = ["4H"]          # higher-timeframe context, never gating
+auction = ["30M"]         # Layer A decisions
+micro = ["5M", "1M"]      # Layers B and C
+
+[freshness]
+# USER POLICY: maximum age of a screenshot (decision time minus capture time).
+max_age_seconds = { "1M" = 120, "5M" = 600, "30M" = 2700, "4H" = 21600 }
+# USER POLICY: maximum lag between screenshot capture and the chart's last data update.
+max_update_lag_seconds = 120
+# "block": any stale/unsynchronised decision-layer screenshot forces WAIT.
+# "exclude": stale screenshots are dropped; decision proceeds on the rest.
+stale_policy = "block"
+
+[sync]
+# USER POLICY: maximum spread of capture times inside one group of screenshots.
+micro_max_skew_seconds = 180
+auction_max_skew_seconds = 900
+
+[observations]
+use_uncertain = false          # UNCERTAIN readings are shown but treated as UNKNOWN
+use_unverified_vision = false  # vision output must be confirmed by the user first
+
+[thresholds]
+calibrated = false
+# PROJECT ASSUMPTION (uncalibrated): closed 30M bars outside the prior value
+# area required to call it "accepted".
+acceptance_min_closed_bars_30m = 2
+# If true, CONFIRMED states need a resiliency reading built from >= 2
+# time-ordered heatmap screenshots.
+require_resiliency_for_confirmation = true
+# USER POLICY: maximum time between the two heatmap screenshots compared.
+resiliency_max_gap_seconds = 900
+
+[prediction]
+horizons_minutes = [5, 15]
+# Anti-lookahead: a prediction must be journaled within this many seconds of
+# its as-of time.
+max_record_delay_seconds = 120
+
+[evaluation]
+# Price source label that must match imported 1m bars.
+price_source = "user_csv_1m"
+# neutral_band_bps = 0.0         # REQUIRED (unless a full cost model exists) to score predictions
+# test_start_utc = "2026-11-01T00:00:00Z"   # chronological split, set BEFORE looking at results
+min_sample_for_any_claim = 100   # USER POLICY; below this no statistical claim is printed
+
+[costs]
+# Fill in from YOUR account. No defaults are shipped on purpose.
+# taker_fee_bps = 
+# maker_fee_bps = 
+# spread_bps = 
+# slippage_bps = 
+# funding_cost_bps_if_crossed = 
+# funding_times_utc = ["HH:MM", ...]
+entry_type = "TAKER"
+exit_type = "TAKER"
+
+[l2]
+enabled = false   # MODE B; requires a validated event-level L2 stream
+
+[vision]
+backend = "none"  # or "module.path:ClassName" of an explicitly configured backend
+
+[display]
+timezone = "Europe/Warsaw"
