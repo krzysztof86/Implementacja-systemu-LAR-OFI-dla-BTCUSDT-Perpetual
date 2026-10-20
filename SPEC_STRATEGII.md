@@ -1,6 +1,6 @@
 # SPEC_STRATEGII — LAR-OFI (Liquidity, Aggression, Resiliency & Order Flow Imbalance)
 
-Wersja specyfikacji: 1 (silnik `lar-ofi-engine/1`). Instrument: **Bybit BTCUSDT USDT Perpetual**.
+Wersja specyfikacji: **2** (faza 5, po audycie; silnik `lar-ofi-engine/1`, schemat dziennika v2). Instrument: **Bybit BTCUSDT USDT Perpetual**.
 Czas wewnętrzny: UTC. Wyświetlanie: Europe/Warsaw.
 
 > To jest specyfikacja **hipotezy roboczej**. Żaden próg nie jest skalibrowany (`calibrated = false`).
@@ -8,6 +8,13 @@ Czas wewnętrzny: UTC. Wyświetlanie: Europe/Warsaw.
 
 Implementacja: `src/lar_ofi/engine.py` (stan rynku), `src/lar_ofi/setups.py` (setupy),
 `src/lar_ofi/decision.py` (decyzja). Ten dokument opisuje dokładnie te reguły.
+
+**Zmiany w wersji 2** (uzasadnienie i analiza: `FAZA_5_AUDYT_POPRAWKI.md`):
+trzy znaczniki czasu (`data_as_of`, `decision_time`, `recorded_at`, §9); wymóg ostatniej zamkniętej
+świecy 30M/5M i dowodu aktualności wykresu (§7); interwał decyzyjny MICRO — odczyt 1M nie może spełnić
+warunku 5M (§2); procedury odczytu i okna obserwacji (`PROTOKOL_OBSERWACJI.md`); porównanie dwóch
+heatmap nazwane jako jakościowa zmiana widocznej płynności, nie Liquidity Resiliency (§5); baseline
+momentum tylko z cen znanych w chwili decyzji (§9); świece rozliczeniowe powiązane z rynkiem (§9).
 
 ---
 
@@ -32,8 +39,14 @@ Wyniki backendu vision są `UNVERIFIED` i ignorowane do czasu potwierdzenia (`la
 | AUCTION | 30M | warstwa A — pozycja względem poprzedniego value area, akceptacja |
 | MICRO | 5M, 1M | warstwy B i C — agresja, płynność, OI, likwidacje |
 
-Odczyty tego samego pola w jednym scope (np. 5M i 1M) muszą się zgadzać; w przeciwnym razie pole =
-`CONFLICT` → WAIT. Wyjątek: `last_price` (bierze się najpóźniejszy odczyt).
+**Interwał decyzyjny MICRO** = `analysis_timeframe` z manifestu (5M lub 1M; domyślnie
+`timeframes.micro_decision = 5M`). Dla pól używanych w warunkach setupów (agresja, reakcja ceny, OI,
+płynność, porównanie heatmap):
+* wartość musi pochodzić z interwału decyzyjnego; sam odczyt z drugiego interwału MICRO → `UNKNOWN`;
+* zgodny odczyt z drugiego interwału to tylko kontrola spójności — **nie** dodatkowy dowód;
+* jakakolwiek rozbieżność odczytów (także 5M vs 1M) → `CONFLICT` → WAIT.
+Pola kontekstowe (`liquidations`, `absorption_signal`) mogą pochodzić z dowolnego interwału MICRO;
+rozbieżność → `CONFLICT`. `last_price`: bierze się najpóźniejszy odczyt.
 
 ## 3. Schemat danych
 
@@ -45,8 +58,13 @@ Odczyty tego samego pola w jednym scope (np. 5M i 1M) muszą się zgadzać; w pr
  "regime_tag": null,
  "screenshots": [{"file": "...png", "timeframe": "5M", "indicators": ["Agg. CVD"],
                   "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:45Z",
-                  "data_last_update_utc": "2026-10-20T09:59:44Z", "notes": ""}]}
+                  "data_last_update_utc": "2026-10-20T09:59:44Z", "live_feed_confirmed": false,
+                  "view_settings": "<tylko heatmapy: zakres cen/czasu, skala barw>", "notes": ""}]}
 ```
+
+`analysis_timeframe` musi być interwałem MICRO (5M/1M), inaczej zestaw odrzucony.
+`live_feed_confirmed` (bool) — oświadczenie użytkownika, że wykres się aktualizował, gdy platforma nie
+pokazuje czasu ostatniej aktualizacji. `view_settings` — wymagane identyczne w obu porównywanych heatmapach.
 
 Walidacja: instrument / giełda / typ kontraktu muszą zgadzać się z konfiguracją (inaczej cały zestaw
 odrzucony). Screenshot odrzucany przy: innym `chart_instrument`, nieznanym wskaźniku, nieprawidłowym
@@ -58,6 +76,11 @@ dla wskaźnika, ponowne użycie pliku z innego zestawu. `dataset_id` = SHA-256 m
 więc ponowny import nic nie dodaje.
 
 ### 3.2 Słownik obserwacji (`src/lar_ofi/registry.py`)
+
+Procedura odczytu każdego pola, typ pomiaru, okno obserwacji i warunki zapisu `UNKNOWN`:
+**`PROTOKOL_OBSERWACJI.md`** (OBS-PROTOCOL-2). Pola z oknem (agresja, reakcja ceny, OI, CVD, likwidacje,
+Absorption) wymagają `window_start_utc`/`window_end_utc`; okno musi kończyć się na ostatniej świecy
+zamkniętej przed wykonaniem screenshotu, inaczej odczyt = `UNKNOWN` (`WINDOW_NOT_LATEST_CLOSED_BAR`).
 
 | Pole | Warstwa | Interwały | Wskaźnik(i) | Wartości |
 |---|---|---|---|---|
@@ -144,7 +167,7 @@ przeciwnej strony — kontynuacja jest możliwa.
 | **C-X2** unieważnienie | agresja BUY **i** `aggression_efficiency = INEFFECTIVE` (kupno absorbowane) | SELL + INEFFECTIVE |
 | **C-2** confirmation | `closed_bars_outside_value ≥ N` **i** `returned_inside_value = NO` | to samo |
 | **C-3** confirmation | `aggression_efficiency = EFFECTIVE` | to samo |
-| **C-4** confirmation | `ask_side_after_consumption = NOT_REPLENISHED` (2 heatmapy) — lub, jeśli `require_resiliency_for_confirmation = false`, `passive_liquidity_above ∈ {THIN, NOT_VISIBLE}` | `bid_side_…` / `passive_liquidity_below` |
+| **C-4** confirmation | `ask_side_after_consumption = NOT_REPLENISHED` (jakościowe porównanie 2 heatmap o identycznych `view_settings`; **nie** pomiar resiliency) — lub, jeśli `require_resiliency_for_confirmation = false`, `passive_liquidity_above ∈ {THIN, NOT_VISIBLE}` | `bid_side_…` / `passive_liquidity_below` |
 | **C-5** confirmation | `oi_change ∈ {RISING, FLAT}` (ruch nie jest wyłącznie zamykaniem pozycji) | to samo |
 | kontekst (nie warunek) | SHORTS_LIQUIDATED/BOTH → PRZECIW (ruch może być wymuszony); OI RISING → ZA; Absorption ASK_SIDE → PRZECIW (pomocniczo); gruba płynność ask → PRZECIW; 4H po tej samej stronie → ZA | lustrzanie |
 
@@ -163,7 +186,7 @@ SHORT = nieudane wybicie w górę; LONG = nieudane wybicie w dół.
 | **F-X1** unieważnienie | akceptacja: pozycja ABOVE **i** `closed_bars_outside_value ≥ N` **i** `returned = NO` | BELOW … |
 | **F-X2** unieważnienie | `price_response_at_extreme = ADVANCED` (agresja skuteczna) | to samo |
 | **F-3** confirmation | `returned_inside_value = YES` **i** pozycja INSIDE | to samo |
-| **F-4** confirmation | `ask_side_after_consumption = REPLENISHED` (2 heatmapy) — lub przy wyłączonym wymogu `passive_liquidity_above = THICK` | `bid_side…` / `passive_liquidity_below` |
+| **F-4** confirmation | `ask_side_after_consumption = REPLENISHED` (jakościowe porównanie 2 heatmap o identycznych `view_settings`; **nie** pomiar resiliency) — lub przy wyłączonym wymogu `passive_liquidity_above = THICK` | `bid_side…` / `passive_liquidity_below` |
 | kontekst (nie warunek) | OI FALLING → ZA; OI RISING → NEUTRALNY; LONGS_LIQUIDATED/BOTH → ZA; Absorption ASK_SIDE → ZA (pomocniczo, nigdy samodzielnie) | lustrzanie |
 
 Knot świecy, delta czy Absorption **same** nie wystarczają: bez F-1, F-2, F-3, F-4 nie ma CONFIRMED
@@ -192,7 +215,10 @@ screenshot bez obserwacji jest raportowany, ale nie blokuje decyzji.
 2. Brak znacznika czasu na screenshocie warstw decyzyjnych (`INSUFFICIENT_DATA`).
 3. Screenshot starszy niż `freshness.max_age_seconds[tf]` (domyślnie 1M: 120 s, 5M: 600 s,
    30M: 2700 s, 4H: 21600 s — **polityka użytkownika**).
-4. `captured_at − data_last_update > max_update_lag_seconds` (120 s).
+4. `captured_at − data_last_update > max_update_lag_seconds` (120 s) albo **brak** `data_last_update_utc`
+   i brak `live_feed_confirmed` (`FRESHNESS_UNVERIFIABLE`; polityka `require_update_evidence = true`).
+4a. Screenshot 30M lub 5M wykonany **przed** ostatnim zamknięciem świecy swojego interwału przed czasem
+   decyzji (`MISSING_LATEST_CLOSED_BAR`; `require_latest_closed_bar = ["30M", "5M"]`, świece wyrównane do UTC).
 5. Rozrzut czasów wykonania w MICRO > 180 s lub w AUCTION > 900 s.
 6. Dowolny konflikt z sekcji 6 (D2) lub konflikt setupów (D4).
 7. Brak potwierdzenia: którykolwiek warunek confirmation FALSE lub UNKNOWN (w tym odbudowa przy jednym
@@ -219,9 +245,20 @@ opcjonalnie (5) 1M: Liquidations + Absorption, (6) 4H: TPO. Szablon: `examples/m
 ## 9. Prognoza i rozliczenie
 
 * Horyzonty: 5 i 15 minut. Prawdopodobieństwo: `NOT_CALIBRATED`.
-* Zapis tylko przez `lar-ofi predict` (czas decyzji = zegar systemowy), max 120 s po czasie danych.
+* Trzy znaczniki czasu:
+  `data_as_of` = czas wykonania najnowszego screenshotu, którego obserwacje silnik faktycznie użył
+  (gdy żaden nie jest użyteczny — najnowszego niosącego obserwacje, nie późniejszego niż decyzja);
+  `decision_time` = zegar systemowy w chwili oceny (`lar-ofi predict`);
+  `recorded_at` = zegar w chwili zapisu (odczytany osobno, po ocenie).
+  Wymagane `data_as_of ≤ decision_time ≤ recorded_at`, `recorded_at − data_as_of ≤ 120 s`
+  (`max_record_delay_seconds`) i `recorded_at − decision_time ≤ 30 s` (`max_decision_to_record_seconds`).
+  Inaczej `LATE_RECORDING` — prognoza nie jest zapisywana.
 * Reguła rozliczenia zamrażana w prognozie: wejście = open pierwszej świecy 1m z `open_time ≥ recorded_at`;
-  wyjście = open świecy `entry + h`; źródło cen = etykieta CSV użytkownika.
+  wyjście = open świecy `entry + h`; źródło cen = etykieta CSV użytkownika **oraz rynek**
+  (instrument, giełda, typ kontraktu). Świece innego rynku nigdy nie rozliczają prognozy.
+* Baseline momentum: kierunek = znak(close świecy 1m zamkniętej o `floor_minute(decision_time)` − close
+  świecy zamkniętej h minut wcześniej) — wyłącznie ceny znane w chwili decyzji. Wynik baseline'u jest
+  liczony na tym samym symulowanym wejściu/wyjściu co system.
 * Ruch nieistotny: `|zwrot| ≤ neutral_band_bps` → NEUTRAL (dla WAIT: NO_SIGNIFICANT_MOVE). Pasmo =
   `evaluation.neutral_band_bps` lub, gdy brak, koszt round-trip z modelu kosztów. Gdy brak obu →
   `UNSCORABLE` (trafność nie jest oceniana).
@@ -235,7 +272,7 @@ Szczegóły i ograniczenia: `RESEARCH_EVIDENCE.md`, sekcja F. Skrót:
 | Reguła | Źródło mechanizmu | Charakter |
 |---|---|---|
 | C-3, C-X2, F-2, F-X2 (agresja vs ruch ceny) | Cont, Kukanov, Stoikov (2014) — wpływ przepływu zależny od głębokości | hipoteza projektu (przybliżenie jakościowe) |
-| C-4, F-4 (odbudowa płynności, 2 screenshoty) | Large (2007) — resiliency | hipoteza projektu |
+| C-4, F-4 (jakościowa zmiana widocznej płynności, 2 screenshoty) | inspiracja: Large (2007) — resiliency; **nie jest to pomiar resiliency** | hipoteza projektu |
 | Grupa TRADE_AGGRESSION | Schmalz (2026) — trade-flow imbalance nieistotny samodzielnie | reguła metodologiczna |
 | C-T, C-2, F-T, F-3, F-X1 (value area, akceptacja) | teoria aukcji / Market Profile — **poza listą publikacji** | hipoteza projektu |
 | C-5, kontekst OI / likwidacje | brak źródła w zestawie | hipoteza projektu |

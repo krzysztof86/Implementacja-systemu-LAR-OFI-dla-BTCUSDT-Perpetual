@@ -1,5 +1,7 @@
 # RAPORT DLA AUDYTORA — LAR-OFI MVP
 
+> **Dokument historyczny — stan po fazie 4.** Poprawki po audycie i aktualne wyniki: `FAZA_5_RAPORT_DLA_AUDYTORA.md`.
+
 Data: 2026-10-20. Gałąź: `ccr-c24d3880-0mfxmy`. Silnik: `lar-ofi-engine/1`.
 
 Dokumenty do kontroli: `SPEC_STRATEGII.md`, `RESEARCH_EVIDENCE.md`, `TEST_REPORT.md`,

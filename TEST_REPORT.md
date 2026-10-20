@@ -1,5 +1,7 @@
 # TEST_REPORT — raport testów LAR-OFI
 
+> **Dokument historyczny — stan po fazie 4.** Poprawki po audycie i aktualne wyniki: `FAZA_5_TESTY.md`.
+
 Raport wygenerowany z **rzeczywistego** uruchomienia `python3 -m pytest -v` w kontenerze projektu.
 
 | Element | Wartość |

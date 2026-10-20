@@ -20,3 +20,10 @@
 
 [freshness]
 # stale_policy = "block"
+# Set to false ONLY if your platform never shows the last data update time and you
+# do not want to attest live_feed_confirmed per screenshot (reduces protection).
+# require_update_evidence = true
+
+[timeframes]
+# Decision timeframe for micro readings (a manifest's analysis_timeframe overrides it).
+# micro_decision = "5M"

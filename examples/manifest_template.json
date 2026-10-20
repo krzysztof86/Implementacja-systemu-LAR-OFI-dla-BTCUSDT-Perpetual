@@ -1,4 +1,5 @@
 {
+  "_comment": "Faza 5: każdy screenshot warstw 30M/5M/1M potrzebuje data_last_update_utc albo live_feed_confirmed=true (Twoje oświadczenie, że wykres się aktualizował). Dwie heatmapy porównywane ze sobą muszą mieć IDENTYCZNE view_settings. Screenshot 30M i 5M musi być wykonany po ostatnim zamknięciu świecy 30M/5M przed decyzją.",
   "manifest_version": 1,
   "instrument": "BTCUSDT",
   "exchange": "Bybit",
@@ -8,19 +9,80 @@
   "analysis_timeframe": "5M",
   "regime_tag": null,
   "screenshots": [
-    {"file": "ctx_4h.png", "timeframe": "4H", "indicators": ["Agg. TPO"],
-     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:00Z", "data_last_update_utc": "2026-10-20T09:58:58Z",
-     "notes": ""},
-    {"file": "auction_30m.png", "timeframe": "30M", "indicators": ["Agg. TPO", "Agg. Session Volume Profile", "Anchored VWAP"],
-     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:30Z", "data_last_update_utc": "2026-10-20T09:59:29Z",
-     "notes": "AVWAP anchor: WPISZ"},
-    {"file": "heat_5m_earlier.png", "timeframe": "5M", "indicators": ["Agg. Order Book Heatmap"],
-     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:55:00Z", "data_last_update_utc": "2026-10-20T09:54:59Z"},
-    {"file": "heat_5m_now.png", "timeframe": "5M", "indicators": ["Agg. Order Book Heatmap"],
-     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:40Z", "data_last_update_utc": "2026-10-20T09:59:39Z"},
-    {"file": "flow_5m.png", "timeframe": "5M", "indicators": ["Agg. Volume Footprint", "Agg. Open Interest", "Agg. CVD"],
-     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:45Z", "data_last_update_utc": "2026-10-20T09:59:44Z"},
-    {"file": "conf_1m.png", "timeframe": "1M", "indicators": ["Agg. Liquidations", "Absorption"],
-     "chart_instrument": "BTCUSDT", "captured_at_utc": "2026-10-20T09:59:50Z", "data_last_update_utc": "2026-10-20T09:59:49Z"}
+    {
+      "file": "ctx_4h.png",
+      "timeframe": "4H",
+      "indicators": [
+        "Agg. TPO"
+      ],
+      "chart_instrument": "BTCUSDT",
+      "captured_at_utc": "2026-10-20T10:09:00Z",
+      "data_last_update_utc": "2026-10-20T10:08:59Z",
+      "notes": "",
+      "live_feed_confirmed": false
+    },
+    {
+      "file": "auction_30m.png",
+      "timeframe": "30M",
+      "indicators": [
+        "Agg. TPO",
+        "Agg. Session Volume Profile",
+        "Anchored VWAP"
+      ],
+      "chart_instrument": "BTCUSDT",
+      "captured_at_utc": "2026-10-20T10:09:10Z",
+      "data_last_update_utc": "2026-10-20T10:09:09Z",
+      "notes": "AVWAP anchor: WPISZ",
+      "live_feed_confirmed": false
+    },
+    {
+      "file": "heat_5m_earlier.png",
+      "timeframe": "5M",
+      "indicators": [
+        "Agg. Order Book Heatmap"
+      ],
+      "chart_instrument": "BTCUSDT",
+      "captured_at_utc": "2026-10-20T10:05:30Z",
+      "data_last_update_utc": "2026-10-20T10:05:29Z",
+      "view_settings": "WPISZ: zakres cen, zakres czasu, skala barw (identyczne w obu heatmapach)",
+      "live_feed_confirmed": false
+    },
+    {
+      "file": "heat_5m_now.png",
+      "timeframe": "5M",
+      "indicators": [
+        "Agg. Order Book Heatmap"
+      ],
+      "chart_instrument": "BTCUSDT",
+      "captured_at_utc": "2026-10-20T10:09:15Z",
+      "data_last_update_utc": "2026-10-20T10:09:14Z",
+      "view_settings": "WPISZ: zakres cen, zakres czasu, skala barw (identyczne w obu heatmapach)",
+      "live_feed_confirmed": false
+    },
+    {
+      "file": "flow_5m.png",
+      "timeframe": "5M",
+      "indicators": [
+        "Agg. Volume Footprint",
+        "Agg. Open Interest",
+        "Agg. CVD"
+      ],
+      "chart_instrument": "BTCUSDT",
+      "captured_at_utc": "2026-10-20T10:09:20Z",
+      "data_last_update_utc": "2026-10-20T10:09:19Z",
+      "live_feed_confirmed": false
+    },
+    {
+      "file": "conf_1m.png",
+      "timeframe": "1M",
+      "indicators": [
+        "Agg. Liquidations",
+        "Absorption"
+      ],
+      "chart_instrument": "BTCUSDT",
+      "captured_at_utc": "2026-10-20T10:09:25Z",
+      "data_last_update_utc": "2026-10-20T10:09:24Z",
+      "live_feed_confirmed": false
+    }
   ]
 }

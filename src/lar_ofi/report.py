@@ -39,8 +39,10 @@ def questions(a: dict) -> dict:
                                       f"{ms['price_response_at_extreme']}"),
         "05_visible_liquidity": (f"above: {ms['passive_liquidity_above']}; below: {ms['passive_liquidity_below']} "
                                  "(visible heatmap only; cancellations/queues not observable)"),
-        "06_book_replenishment": (f"ask side: {ms['ask_side_resiliency']}; bid side: {ms['bid_side_resiliency']}; "
-                                  f"notes: {ms['resiliency_notes'] or '-'}; {ms['l2_metrics']}"),
+        "06_book_replenishment": (f"qualitative heatmap comparison (2 screenshots, not a resiliency "
+                                  f"measurement): ask side {ms['ask_side_visual_change']}; bid side "
+                                  f"{ms['bid_side_visual_change']}; notes: {ms['visual_change_notes'] or '-'}; "
+                                  f"{ms['l2_metrics']}"),
         "07_open_interest": ms["oi_change"],
         "08_liquidations": ms["liquidations"],
         "09_most_justified_scenario": a["hypotheses"][0]["statement"],
@@ -58,8 +60,10 @@ def build_report(assessment: dict, engine_input: dict, cfg: dict, data_dir: str 
                       "captured_at_utc": s["captured_at_utc"]})
     report = dict(assessment)
     report["report_version"] = REPORT_VERSION
-    report["as_of_local"] = to_local_str(parse_utc(assessment["as_of_utc"]) if assessment["as_of_utc"] else None,
-                                         cfg["display"]["timezone"])
+    tz = cfg["display"]["timezone"]
+    for key in ("decision_time", "data_as_of"):
+        value = assessment[f"{key}_utc"]
+        report[f"{key}_local"] = to_local_str(parse_utc(value) if value else None, tz)
     report["input_sha256"] = input_hash(engine_input)
     report["config_sha256"] = config_hash(cfg)
     report["evidence_links"] = links
@@ -98,10 +102,12 @@ def render_markdown(r: dict) -> str:
     L.append("| Pole | Wartość |")
     L.append("|---|---|")
     rows = [
-        ("Czas decyzji (UTC)", r["as_of_utc"]),
-        ("Czas decyzji (Europe/Warsaw)", r["as_of_local"]),
+        ("Czas decyzji — decision_time (UTC)", r["decision_time_utc"]),
+        ("Czas decyzji (Europe/Warsaw)", r["decision_time_local"]),
+        ("Najnowsza użyta informacja — data_as_of (UTC)", r["data_as_of_utc"]),
+        ("Najnowsza aktualizacja danych wykresu (UTC)", r["data_content_latest_utc"] or UNKNOWN),
         ("Instrument", f"{r['instrument']} {r['contract_type']} @ {r['exchange']}"),
-        ("Interwał analizy", r["analysis_timeframe"]),
+        ("Interwał decyzyjny MICRO", r["analysis_timeframe"]),
         ("Zestaw danych", r["dataset_id"]),
         ("Status danych", r["data_status"]),
         ("Stan rynku", r["market_state"]["label"]),

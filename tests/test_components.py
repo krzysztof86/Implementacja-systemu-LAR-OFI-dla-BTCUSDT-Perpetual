@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from conftest import CONTINUATION_LONG_OBS, T0
+from conftest import CONTINUATION_LONG_OBS, MARKET, STANDARD_SHOTS, T0, windows_for
 from lar_ofi.config import load_config
 from lar_ofi.evaluation import evaluate, max_drawdown, render_evaluation_markdown, wilson
 from lar_ofi.journal import _funding_crossed, _score_direction, import_price_bars
@@ -63,8 +63,9 @@ def test_correction_supersedes_and_keeps_history(env):
     ds = env.scenario(CONTINUATION_LONG_OBS)
     cur = {o["field"]: o for o in current_observations(env.conn, ds)}
     old = cur["oi_change"]
+    w = windows_for(STANDARD_SHOTS)["flow_5m.png"]
     new_id = add_observation(env.conn, ds, old["screenshot_id"], "oi_change", "FALLING",
-                             supersedes=old["observation_id"])
+                             supersedes=old["observation_id"], window_start=w[0], window_end=w[1])
     cur2 = {o["field"]: o for o in current_observations(env.conn, ds)}
     assert cur2["oi_change"]["observation_id"] == new_id and cur2["oi_change"]["value"] == "FALLING"
     total = env.conn.execute("SELECT COUNT(*) FROM observations WHERE field='oi_change'").fetchone()[0]
@@ -107,7 +108,7 @@ def test_funding_crossing():
 def test_bad_bars_rejected_entirely(env):
     p = env.tmp / "bad.csv"
     p.write_text("open_time_utc,open,high,low,close\n2026-10-20T10:00:30Z,1,2,0.5,1.5\n")
-    r = import_price_bars(env.conn, str(p), "x", T0)
+    r = import_price_bars(env.conn, str(p), "x", MARKET, T0)
     assert r["inserted"] == 0 and r["errors"]
 
 
@@ -124,14 +125,14 @@ def test_evaluation_counts_and_disclosure(env):
     cfg = load_config(overrides={"evaluation": {"neutral_band_bps": 1.0}})
     _journal_one(env, cfg)
     import_price_bars(env.conn, str(_bars_csv(env.tmp / "b.csv", T0 - timedelta(minutes=30), 60)),
-                      "user_csv_1m", T0)
+                      "user_csv_1m", MARKET, T0)
     from lar_ofi.journal import resolve_predictions
     resolve_predictions(env.conn, T0 + timedelta(hours=1))
     s1 = evaluate(env.conn, cfg, T0 + timedelta(hours=1))
     seg = s1["segments"]["ALL"]
     assert seg["n_assessments"] == 1 and seg["decisions"]["LONG"] == 1 and seg["coverage"] == 1.0
-    assert seg["horizons"]["5"]["system"]["hit"] == 1
-    assert seg["horizons"]["5"]["claim"].startswith("INSUFFICIENT_SAMPLE")
+    assert seg["horizons"]["5"]["directional_accuracy"]["non_overlapping"]["hit"] == 1
+    assert seg["horizons"]["5"]["claim"].startswith("IN_SAMPLE_DESCRIPTIVE_ONLY")
     s2 = evaluate(env.conn, cfg, T0 + timedelta(hours=2))
     assert s2["prior_evaluation_runs"] == 1
     assert any("earlier evaluation run" in w for w in s2["warnings"])

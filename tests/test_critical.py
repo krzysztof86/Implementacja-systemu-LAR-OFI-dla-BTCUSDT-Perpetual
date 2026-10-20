@@ -10,7 +10,7 @@ from datetime import timedelta
 
 import pytest
 
-from conftest import CONTINUATION_LONG_OBS, STANDARD_SHOTS, T0, Env
+from conftest import CONTINUATION_LONG_OBS, MARKET, STANDARD_SHOTS, T0, Env, windows_for
 from lar_ofi.config import canonical_json, load_config
 from lar_ofi.engine import assess
 from lar_ofi.evaluation import evaluate
@@ -23,9 +23,9 @@ from lar_ofi.observations import ObservationError, add_observation
 from lar_ofi.report import build_report
 
 
-def run(env: Env, dataset_id, as_of=T0, cfg=None, previous_states=None):
+def run(env: Env, dataset_id, decision_time=T0, cfg=None, previous_states=None):
     cfg = cfg or env.cfg
-    inp = env.engine_input(dataset_id, as_of=as_of, previous_states=previous_states)
+    inp = env.engine_input(dataset_id, decision_time=decision_time, previous_states=previous_states)
     return inp, assess(inp, cfg)
 
 
@@ -97,9 +97,9 @@ def test_03b_naive_timestamp_is_rejected_not_guessed(env):
 # 4 ---------------------------------------------------------------------------
 def test_04_stale_data_gives_wait_under_block_policy(env):
     ds = env.scenario(CONTINUATION_LONG_OBS)
-    _, fresh = run(env, ds, as_of=T0)
+    _, fresh = run(env, ds, decision_time=T0)
     assert fresh["decision"] == "LONG"
-    _, stale = run(env, ds, as_of=T0 + timedelta(minutes=20))
+    _, stale = run(env, ds, decision_time=T0 + timedelta(minutes=20))
     assert stale["decision"] == "WAIT"
     assert any(b.startswith("STALE") for b in stale["blocking_issues"])
 
@@ -107,7 +107,7 @@ def test_04_stale_data_gives_wait_under_block_policy(env):
 def test_04b_stale_data_excluded_under_exclude_policy(env):
     cfg = load_config(overrides={"freshness": {"stale_policy": "exclude"}})
     ds = env.scenario(CONTINUATION_LONG_OBS)
-    _, a = run(env, ds, as_of=T0 + timedelta(minutes=20), cfg=cfg)
+    _, a = run(env, ds, decision_time=T0 + timedelta(minutes=20), cfg=cfg)
     assert a["decision"] == "WAIT"
     assert a["blocking_issues"] == []
     assert {e["file_name"] for e in a["excluded_screenshots"]} >= {"flow_5m.png", "conf_1m.png"}
@@ -125,7 +125,7 @@ def test_04c_chart_not_updated_gives_wait(env):
 def test_04d_unsynchronised_screenshots_give_wait(env):
     shots = copy.deepcopy(STANDARD_SHOTS)
     shots["conf_1m.png"]["offset_s"] = -10
-    shots["flow_5m.png"]["offset_s"] = -400  # still fresh (5M max age 600s) but 390s apart
+    shots["flow_5m.png"]["offset_s"] = -250  # fresh, after the 10:05 close, but 240 s apart from conf_1m
     ds = env.scenario(CONTINUATION_LONG_OBS, shots=shots)
     _, a = run(env, ds)
     assert a["decision"] == "WAIT"
@@ -174,7 +174,9 @@ def test_06_unreadable_values_become_unknown(env):
 def test_06b_uncertain_reading_treated_as_unknown_by_default(env):
     spec = [o for o in CONTINUATION_LONG_OBS if o[1] != "oi_change"]
     ds = env.scenario(spec)
-    add_observation(env.conn, ds, env.shot_ids(ds)["flow_5m.png"], "oi_change", "RISING", readability="UNCERTAIN")
+    w = windows_for(STANDARD_SHOTS)["flow_5m.png"]
+    add_observation(env.conn, ds, env.shot_ids(ds)["flow_5m.png"], "oi_change", "RISING", readability="UNCERTAIN",
+                    window_start=w[0], window_end=w[1])
     _, a = run(env, ds)
     assert a["market_state"]["oi_change"] == "UNKNOWN"
     assert a["decision"] == "WAIT"
@@ -226,8 +228,8 @@ def test_08b_comparison_against_non_heatmap_is_not_measurable(env):
     spec = [o if o[1] != "ask_side_after_consumption" else (*o[:3], "flow_5m.png") for o in CONTINUATION_LONG_OBS]
     ds = env.scenario(spec)
     _, a = run(env, ds)
-    assert a["market_state"]["ask_side_resiliency"] == "UNKNOWN"
-    assert any("RESILIENCY_NOT_MEASURABLE" in n for n in a["market_state"]["resiliency_notes"])
+    assert a["market_state"]["ask_side_visual_change"] == "UNKNOWN"
+    assert any("VISUAL_CHANGE_NOT_ASSESSABLE" in n for n in a["market_state"]["visual_change_notes"])
     assert a["setups"]["CONTINUATION"]["state"] == "CANDIDATE_LONG"
     assert a["decision"] == "WAIT"
 
@@ -237,7 +239,7 @@ def test_08c_comparison_with_later_screenshot_is_not_measurable(env):
             for o in CONTINUATION_LONG_OBS]
     ds = env.scenario(spec)
     _, a = run(env, ds)
-    assert a["market_state"]["ask_side_resiliency"] == "UNKNOWN"
+    assert a["market_state"]["ask_side_visual_change"] == "UNKNOWN"
     assert a["decision"] == "WAIT"
 
 
@@ -266,6 +268,7 @@ def test_09_concordant_cvd_and_footprint_are_one_evidence_group(env):
 
 # 10 --------------------------------------------------------------------------
 def _bars_csv(path, start, n, price=68000.0, step=10.0):
+    start = start.replace(second=0)  # bars open on whole minutes
     lines = ["open_time_utc,open,high,low,close"]
     for i in range(n):
         o = price + step * i
@@ -276,23 +279,23 @@ def _bars_csv(path, start, n, price=68000.0, step=10.0):
 
 def _journal_one(env, cfg, obs=CONTINUATION_LONG_OBS):
     ds = env.scenario(obs)
-    inp = env.engine_input(ds, as_of=T0)
+    inp = env.engine_input(ds, decision_time=T0)
     report = build_report(assess(inp, cfg), inp, cfg)
-    return record_prediction(env.conn, report, inp, cfg, recorded_at=T0 + timedelta(seconds=30))
+    return record_prediction(env.conn, report, inp, cfg, recorded_at=T0 + timedelta(seconds=5))
 
 
 def test_10_no_cost_config_means_no_profitability_claim(env):
     rec = _journal_one(env, env.cfg)
     assert rec["resolution_rule"]["cost_model"] is None
     import_price_bars(env.conn, str(_bars_csv(env.tmp / "b.csv", T0 - timedelta(minutes=30), 60)),
-                      "user_csv_1m", T0)
+                      "user_csv_1m", MARKET, T0)
     resolve_predictions(env.conn, T0 + timedelta(hours=1))
     rows = env.conn.execute("SELECT outcome, net_return_bps FROM resolutions").fetchall()
     assert rows and all(r["net_return_bps"] is None for r in rows)
     assert all(r["outcome"] == "UNSCORABLE" for r in rows)  # no neutral band either -> not scored
     s = evaluate(env.conn, env.cfg, T0 + timedelta(hours=1))
     for h in s["segments"]["ALL"]["horizons"].values():
-        assert h["costs"]["status"] == "NO_COST_MODEL"
+        assert h["after_costs"]["non_overlapping"]["status"] == "NO_COST_MODEL"
 
 
 def test_10b_cost_model_only_from_explicit_user_values(env):
@@ -301,10 +304,10 @@ def test_10b_cost_model_only_from_explicit_user_values(env):
     rec = _journal_one(env, cfg)
     assert rec["resolution_rule"]["cost_model"]["round_trip_bps"] == pytest.approx(1 + 1 + 0.2 + 1.0)
     import_price_bars(env.conn, str(_bars_csv(env.tmp / "b.csv", T0 - timedelta(minutes=30), 60)),
-                      "user_csv_1m", T0)
+                      "user_csv_1m", MARKET, T0)
     resolve_predictions(env.conn, T0 + timedelta(hours=1))
     s = evaluate(env.conn, cfg, T0 + timedelta(hours=1))
-    assert s["segments"]["ALL"]["horizons"]["5"]["costs"]["status"] == "COST_MODEL_PRESENT"
+    assert s["segments"]["ALL"]["horizons"]["5"]["after_costs"]["non_overlapping"]["status"] == "COST_MODEL_PRESENT"
 
 
 # 11 --------------------------------------------------------------------------
@@ -316,7 +319,7 @@ def test_11_recorded_prediction_and_result_cannot_be_changed(env):
     with pytest.raises(sqlite3.DatabaseError, match="append-only"):
         env.conn.execute("DELETE FROM predictions")
     import_price_bars(env.conn, str(_bars_csv(env.tmp / "b.csv", T0 - timedelta(minutes=30), 60)),
-                      "user_csv_1m", T0)
+                      "user_csv_1m", MARKET, T0)
     resolve_predictions(env.conn, T0 + timedelta(hours=1))
     with pytest.raises(sqlite3.DatabaseError, match="append-only"):
         env.conn.execute("UPDATE resolutions SET outcome='HIT'")
@@ -339,18 +342,18 @@ def test_12_future_screenshots_do_not_affect_earlier_decision(env):
     shots["later_30m.png"] = {"timeframe": "30M", "indicators": ["Agg. TPO"], "offset_s": 600}
     spec = CONTINUATION_LONG_OBS + [("later_30m.png", "returned_inside_value", "YES")]
     ds = env.scenario(spec, shots=shots, import_time=T0 + timedelta(minutes=15))  # historical re-analysis
-    _, a = run(env, ds, as_of=T0)
+    _, a = run(env, ds, decision_time=T0)
     assert a["decision"] == "LONG"
     assert any("FUTURE_DATA" in r for e in a["excluded_screenshots"] for r in e["reasons"])
-    _, later = run(env, ds, as_of=T0 + timedelta(seconds=600))
+    _, later = run(env, ds, decision_time=T0 + timedelta(seconds=600))
     assert later["decision"] == "WAIT"
 
 
 def test_12b_journal_rejects_future_or_late_recording(env):
     ds = env.scenario(CONTINUATION_LONG_OBS)
-    inp = env.engine_input(ds, as_of=T0)
+    inp = env.engine_input(ds, decision_time=T0)
     report = build_report(assess(inp, env.cfg), inp, env.cfg)
-    with pytest.raises(JournalError, match="future"):
+    with pytest.raises(JournalError, match="TIME_ORDER_VIOLATION"):
         record_prediction(env.conn, report, inp, env.cfg, recorded_at=T0 - timedelta(seconds=1))
     with pytest.raises(JournalError, match="LATE_RECORDING"):
         record_prediction(env.conn, report, inp, env.cfg, recorded_at=T0 + timedelta(minutes=10))
@@ -358,13 +361,13 @@ def test_12b_journal_rejects_future_or_late_recording(env):
 
 def test_12c_resolution_entry_is_after_recording_and_baseline_uses_past_only(env):
     cfg = load_config(overrides={"evaluation": {"neutral_band_bps": 1.0}})
-    _journal_one(env, cfg)  # recorded at T0+30s
+    _journal_one(env, cfg)  # decision at T0 = 10:09:30, recorded at 10:09:35
     import_price_bars(env.conn, str(_bars_csv(env.tmp / "b.csv", T0 - timedelta(minutes=30), 60)),
-                      "user_csv_1m", T0)
+                      "user_csv_1m", MARKET, T0)
     resolve_predictions(env.conn, T0 + timedelta(hours=1))
     r = env.conn.execute("SELECT * FROM resolutions WHERE horizon_minutes=5").fetchone()
-    assert r["entry_time_utc"] == "2026-10-20T10:01:00Z"  # first full minute after recording
-    assert r["exit_time_utc"] == "2026-10-20T10:06:00Z"
+    assert r["entry_time_utc"] == "2026-10-20T10:10:00Z"  # first full minute after recording
+    assert r["exit_time_utc"] == "2026-10-20T10:15:00Z"
     base = json.loads(r["baselines_json"])["MOMENTUM_SAME_HORIZON"]
     assert base["direction"] == "LONG"  # rising synthetic bars before entry
 
@@ -382,8 +385,8 @@ def test_13_reimport_same_dataset_creates_no_duplicates(env):
 
 def test_13b_reimport_price_bars_creates_no_duplicates(env):
     csv = _bars_csv(env.tmp / "b.csv", T0, 10)
-    a = import_price_bars(env.conn, str(csv), "user_csv_1m", T0)
-    b = import_price_bars(env.conn, str(csv), "user_csv_1m", T0)
+    a = import_price_bars(env.conn, str(csv), "user_csv_1m", MARKET, T0)
+    b = import_price_bars(env.conn, str(csv), "user_csv_1m", MARKET, T0)
     assert (a["inserted"], b["inserted"], b["duplicates"]) == (10, 0, 10)
     assert env.conn.execute("SELECT COUNT(*) FROM price_bars").fetchone()[0] == 10
 
