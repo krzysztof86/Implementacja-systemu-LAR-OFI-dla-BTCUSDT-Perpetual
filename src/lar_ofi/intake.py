@@ -102,6 +102,9 @@ def validate_manifest_header(manifest: dict, cfg: dict) -> list[str]:
     tf = manifest.get("analysis_timeframe")
     if tf is not None and tf not in TIMEFRAMES:
         raise ManifestError(f"analysis_timeframe {tf!r} not in {TIMEFRAMES}")
+    platform = str(manifest.get("source_platform") or "")
+    if "openmarket" not in platform.lower():
+        issues.append(f"SOURCE_PLATFORM_UNVERIFIED: {platform or 'not stated'} (expected OpenMarket.xyz)")
     if not manifest.get("data_source_config"):
         issues.append("DATA_SOURCE_CONFIG_UNKNOWN: aggregated ('Agg.') indicator venues not stated")
     if len(manifest["screenshots"]) == 0:
