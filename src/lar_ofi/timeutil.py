@@ -57,6 +57,21 @@ def to_local_str(dt: datetime | None, tz_name: str = "Europe/Warsaw") -> str | N
     return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+TIMEFRAME_SECONDS = {"1M": 60, "5M": 300, "30M": 1800, "4H": 14400}
+
+
+def floor_bar(dt: datetime, timeframe: str) -> datetime:
+    """Open time of the bar containing dt, for bars aligned to 00:00 UTC
+    (assumption: OpenMarket/Bybit intraday bars are UTC-aligned)."""
+    step = TIMEFRAME_SECONDS[timeframe]
+    epoch = int(dt.timestamp())
+    return datetime.fromtimestamp(epoch - epoch % step, tz=timezone.utc)
+
+
+def floor_minute(dt: datetime) -> datetime:
+    return dt.replace(second=0, microsecond=0)
+
+
 def ceil_minute(dt: datetime) -> datetime:
     floored = dt.replace(second=0, microsecond=0)
     return floored if floored == dt else floored + timedelta(minutes=1)

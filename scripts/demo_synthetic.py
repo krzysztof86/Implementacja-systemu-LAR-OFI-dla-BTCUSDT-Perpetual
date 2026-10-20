@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
-from conftest import CONTINUATION_LONG_OBS, FAILED_AUCTION_SHORT_OBS, T0, Env  # noqa: E402
+from conftest import CONTINUATION_LONG_OBS, FAILED_AUCTION_SHORT_OBS, MARKET, T0, Env  # noqa: E402
 from lar_ofi.config import load_config  # noqa: E402
 from lar_ofi.engine import assess  # noqa: E402
 from lar_ofi.evaluation import evaluate, render_evaluation_markdown  # noqa: E402
@@ -36,19 +36,19 @@ def main(out_dir: str) -> None:
                  ("failed_auction_short", FAILED_AUCTION_SHORT_OBS, T0 + timedelta(minutes=30))]
     for name, obs, t in scenarios:
         ds = env.scenario(obs, name=name, t0=t, import_time=t + timedelta(minutes=1))
-        inp = env.engine_input(ds, as_of=t)
+        inp = env.engine_input(ds, decision_time=t)
         report = build_report(assess(inp, env.cfg), inp, env.cfg, env.data_dir)
         write_report(report, out, f"SYNTHETIC_{name}")
-        rec = record_prediction(env.conn, report, inp, env.cfg, recorded_at=t + timedelta(seconds=20))
+        rec = record_prediction(env.conn, report, inp, env.cfg, recorded_at=t + timedelta(seconds=5))
         print(f"{name}: decision={report['decision']} prediction_id={rec['prediction_id']}")
     lines = ["open_time_utc,open,high,low,close"]
     for i in range(120):  # invented path: up for 45 min, then down
         o = 68000 + (10 * i if i < 45 else 450 - 12 * (i - 45))
         c = o + (10 if i < 45 else -12)
-        lines.append(f"{(T0 - timedelta(minutes=30) + timedelta(minutes=i)).strftime('%Y-%m-%dT%H:%M:%SZ')},"
+        lines.append(f"{(T0.replace(second=0) - timedelta(minutes=30) + timedelta(minutes=i)).strftime('%Y-%m-%dT%H:%M:%SZ')},"
                      f"{o},{max(o, c) + 3},{min(o, c) - 3},{c}")
     (out / "SYNTHETIC_bars.csv").write_text("\n".join(lines))
-    print(import_price_bars(env.conn, str(out / "SYNTHETIC_bars.csv"), "user_csv_1m", T0))
+    print(import_price_bars(env.conn, str(out / "SYNTHETIC_bars.csv"), "user_csv_1m", MARKET, T0))
     print(json.dumps(resolve_predictions(env.conn, T0 + timedelta(hours=2)), indent=1))
     summary = evaluate(env.conn, env.cfg, T0 + timedelta(hours=2))
     (out / "SYNTHETIC_evaluation.md").write_text(render_evaluation_markdown(summary))

@@ -13,12 +13,24 @@ contract_type = "USDT_PERPETUAL"
 context = ["4H"]          # higher-timeframe context, never gating
 auction = ["30M"]         # Layer A decisions
 micro = ["5M", "1M"]      # Layers B and C
+# Micro timeframe whose readings may satisfy setup conditions (overridden by the
+# manifest's analysis_timeframe). Readings from the other micro timeframe can
+# only CONTRADICT (-> CONFLICT -> WAIT), never add confirmation.
+micro_decision = "5M"
 
 [freshness]
 # USER POLICY: maximum age of a screenshot (decision time minus capture time).
 max_age_seconds = { "1M" = 120, "5M" = 600, "30M" = 2700, "4H" = 21600 }
 # USER POLICY: maximum lag between screenshot capture and the chart's last data update.
 max_update_lag_seconds = 120
+# Timeframes whose screenshot must include the latest CLOSED bar before the
+# decision time (captured at/after the last bar boundary, bars aligned to UTC).
+# Rationale: setup rules read closed bars; a screenshot taken before the most
+# recent close describes an outdated state. Not a tunable threshold.
+require_latest_closed_bar = ["30M", "5M"]
+# A decision-layer screenshot needs evidence that the chart was live: either
+# data_last_update_utc or the user's explicit live_feed_confirmed attestation.
+require_update_evidence = true
 # "block": any stale/unsynchronised decision-layer screenshot forces WAIT.
 # "exclude": stale screenshots are dropped; decision proceeds on the rest.
 stale_policy = "block"
@@ -45,9 +57,14 @@ resiliency_max_gap_seconds = 900
 
 [prediction]
 horizons_minutes = [5, 15]
-# Anti-lookahead: a prediction must be journaled within this many seconds of
-# its as-of time.
+# Anti-lookahead, three timestamps (phase 5):
+#   data_as_of   = latest capture time of a data-bearing screenshot used
+#   decision_time = moment the engine evaluated the data (wall clock in `predict`)
+#   recorded_at  = moment the journal row is written
+# USER POLICY: recorded_at - data_as_of must not exceed this.
 max_record_delay_seconds = 120
+# Engineering bound: recorded_at - decision_time (assessment + report writing).
+max_decision_to_record_seconds = 30
 
 [evaluation]
 # Price source label that must match imported 1m bars.
@@ -55,6 +72,9 @@ price_source = "user_csv_1m"
 # neutral_band_bps = 0.0         # REQUIRED (unless a full cost model exists) to score predictions
 # test_start_utc = "2026-11-01T00:00:00Z"   # chronological split, set BEFORE looking at results
 min_sample_for_any_claim = 100   # USER POLICY; below this no statistical claim is printed
+# Conventional significance level for the paired (McNemar exact) comparison
+# with each baseline; Bonferroni-corrected by the number of comparisons.
+alpha = 0.05
 
 [costs]
 # Fill in from YOUR account. No defaults are shipped on purpose.

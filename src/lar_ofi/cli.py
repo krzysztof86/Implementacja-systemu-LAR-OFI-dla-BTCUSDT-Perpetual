@@ -10,7 +10,7 @@ from pathlib import Path
 
 from lar_ofi import __version__
 from lar_ofi.config import config_hash, cost_model, load_config
-from lar_ofi.db import connect
+from lar_ofi.db import SchemaError, connect
 from lar_ofi.engine import assess
 from lar_ofi.evaluation import evaluate, render_evaluation_markdown
 from lar_ofi.intake import ManifestError, import_dataset
@@ -39,15 +39,21 @@ def _ctx(args):
     return home, connect(db), cfg
 
 
-def _assess(conn, cfg, dataset_id, as_of, previous_dataset, home):
+def _assess(conn, cfg, dataset_id, decision_time, previous_dataset, home):
     previous_states = {}
     if previous_dataset:
-        prev_inp = build_engine_input(conn, previous_dataset)
+        prev_inp = build_engine_input(conn, previous_dataset, cfg=cfg)
         prev = assess(prev_inp, cfg)
         previous_states = {k: v["state"] for k, v in prev["setups"].items()}
-    inp = build_engine_input(conn, dataset_id, as_of=as_of, previous_states=previous_states)
+    inp = build_engine_input(conn, dataset_id, decision_time=decision_time, previous_states=previous_states,
+                             cfg=cfg)
     result = assess(inp, cfg)
     return inp, build_report(result, inp, cfg, data_dir=home)
+
+
+def _clock():
+    """Wall clock; a separate function so integration tests can simulate delays."""
+    return now_utc()
 
 
 def cmd_init(args):
@@ -83,7 +89,8 @@ def cmd_observe(args):
     try:
         oid = add_observation(conn, args.dataset, args.screenshot, args.field, _parse_value(args.value),
                               readability=args.readability, compared_with=args.compared_with, note=args.note or "",
-                              supersedes=args.supersedes)
+                              supersedes=args.supersedes, window_start=args.window_start,
+                              window_end=args.window_end)
     except ObservationError as exc:
         _print({"status": "REJECTED", "error": str(exc)})
         return 2
@@ -111,7 +118,8 @@ def cmd_confirm(args):
                           readability=args.readability or o["readability"],
                           compared_with=o["compared_with_screenshot_id"], source="manual-confirm",
                           verified=True, note=f"confirms/corrects #{o['observation_id']} ({o['source']})",
-                          supersedes=o["observation_id"])
+                          supersedes=o["observation_id"], window_start=o["window_start_utc"],
+                          window_end=o["window_end_utc"])
     _print({"status": "OK", "observation_id": oid})
     return 0
 
@@ -124,9 +132,9 @@ def cmd_show(args):
 
 def cmd_analyze(args):
     home, conn, cfg = _ctx(args)
-    as_of = parse_utc(args.as_of) if args.as_of else None
-    inp, report = _assess(conn, cfg, args.dataset, as_of, args.previous_dataset, home)
-    stem = f"analysis_{args.dataset}_{(report['as_of_utc'] or 'no-time').replace(':', '')}"
+    decision_time = parse_utc(args.decision_time) if args.decision_time else None
+    inp, report = _assess(conn, cfg, args.dataset, decision_time, args.previous_dataset, home)
+    stem = f"analysis_{args.dataset}_{(report['decision_time_utc'] or 'no-time').replace(':', '')}"
     jp, mp = write_report(report, args.out or home / "reports", stem)
     _print({"decision": report["decision"], "data_status": report["data_status"],
             "active_setup": report["active_setup"], "json": str(jp), "markdown": str(mp)})
@@ -134,10 +142,13 @@ def cmd_analyze(args):
 
 def cmd_predict(args):
     home, conn, cfg = _ctx(args)
-    recorded_at = now_utc()
-    inp, report = _assess(conn, cfg, args.dataset, recorded_at, args.previous_dataset, home)
+    # decision_time: wall clock when the engine evaluates. The lateness limit
+    # is measured from data_as_of (newest screenshot used), NOT from this time,
+    # and recorded_at is read separately just before the journal write.
+    decision_time = _clock()
+    inp, report = _assess(conn, cfg, args.dataset, decision_time, args.previous_dataset, home)
     try:
-        rec = record_prediction(conn, report, inp, cfg, recorded_at)
+        rec = record_prediction(conn, report, inp, cfg, recorded_at=_clock())
     except JournalError as exc:
         _print({"status": "NOT_RECORDED", "error": str(exc)})
         return 2
@@ -150,7 +161,14 @@ def cmd_predict(args):
 def cmd_import_bars(args):
     home, conn, cfg = _ctx(args)
     source = args.source or cfg["evaluation"]["price_source"]
-    _print({"source": source, **import_price_bars(conn, args.csv, source, now_utc())})
+    market = {"instrument": args.instrument, "exchange": args.exchange, "contract_type": args.contract_type}
+    try:
+        res = import_price_bars(conn, args.csv, source, market, now_utc())
+    except JournalError as exc:
+        _print({"status": "REJECTED", "error": str(exc)})
+        return 2
+    _print({"source": source, **res})
+    return 0 if not res["errors"] else 2
 
 
 def cmd_resolve(args):
@@ -213,6 +231,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("dataset"); s.add_argument("--screenshot", required=True); s.add_argument("--field", required=True)
     s.add_argument("--value", required=True); s.add_argument("--readability", default="CLEAR")
     s.add_argument("--compared-with"); s.add_argument("--note"); s.add_argument("--supersedes", type=int)
+    s.add_argument("--window-start", help="first closed bar of the observation window (UTC, bar boundary)")
+    s.add_argument("--window-end", help="close of the last closed bar before capture (UTC, bar boundary)")
     s.set_defaults(fn=cmd_observe)
     s = sub.add_parser("observe-file", help="record observations from a filled template")
     s.add_argument("dataset"); s.add_argument("file"); s.set_defaults(fn=cmd_observe_file)
@@ -222,13 +242,18 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("show", help="show screenshots and current observations"); s.add_argument("dataset")
     s.set_defaults(fn=cmd_show)
     s = sub.add_parser("analyze", help="assess a dataset (not journaled)"); s.add_argument("dataset")
-    s.add_argument("--as-of", help="decision time UTC (default: latest screenshot time)")
+    s.add_argument("--decision-time", help="decision time UTC (default: latest screenshot capture time)")
     s.add_argument("--previous-dataset"); s.add_argument("--out"); s.set_defaults(fn=cmd_analyze)
     s = sub.add_parser("predict", help="assess at the current time and journal the prediction (immutable)")
     s.add_argument("dataset"); s.add_argument("--previous-dataset"); s.add_argument("--out")
     s.set_defaults(fn=cmd_predict)
     s = sub.add_parser("import-bars", help="import user-supplied 1m OHLC CSV for resolution")
-    s.add_argument("csv"); s.add_argument("--source"); s.set_defaults(fn=cmd_import_bars)
+    s.add_argument("csv"); s.add_argument("--source")
+    s.add_argument("--instrument", help="e.g. BTCUSDT (required unless the CSV has a 'symbol' column)")
+    s.add_argument("--exchange", help="e.g. Bybit (required unless the CSV has an 'exchange' column)")
+    s.add_argument("--contract-type", help="e.g. USDT_PERPETUAL (required unless the CSV has a "
+                                           "'contract_type' column)")
+    s.set_defaults(fn=cmd_import_bars)
     sub.add_parser("resolve", help="resolve predictions whose horizons have elapsed").set_defaults(fn=cmd_resolve)
     s = sub.add_parser("evaluate", help="chronological accuracy report"); s.add_argument("--out")
     s.set_defaults(fn=cmd_evaluate)
@@ -243,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         rc = args.fn(args)
-    except (ObservationError, JournalError, TimeError, ValueError) as exc:
+    except (ObservationError, JournalError, TimeError, ValueError, SchemaError) as exc:
         _print({"status": "ERROR", "error": str(exc)})
         return 2
     return rc or 0

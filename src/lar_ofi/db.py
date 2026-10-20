@@ -6,7 +6,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+
+
+class SchemaError(RuntimeError):
+    pass
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -37,6 +41,8 @@ CREATE TABLE IF NOT EXISTS screenshots (
     captured_at_utc TEXT,
     data_last_update_utc TEXT,
     chart_instrument TEXT,
+    view_settings TEXT,
+    live_feed_confirmed INTEGER NOT NULL DEFAULT 0,
     notes TEXT,
     issues_json TEXT NOT NULL,
     UNIQUE (dataset_id, sha256)
@@ -54,14 +60,18 @@ CREATE TABLE IF NOT EXISTS observations (
     verified INTEGER NOT NULL,
     entered_at_utc TEXT NOT NULL,
     note TEXT,
+    window_start_utc TEXT,
+    window_end_utc TEXT,
+    protocol_version TEXT NOT NULL,
     supersedes_id INTEGER REFERENCES observations(observation_id)
 );
 
 CREATE TABLE IF NOT EXISTS predictions (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     prediction_id TEXT NOT NULL UNIQUE,
+    data_as_of_utc TEXT NOT NULL,
+    decision_time_utc TEXT NOT NULL,
     recorded_at_utc TEXT NOT NULL,
-    as_of_utc TEXT NOT NULL,
     dataset_id TEXT NOT NULL,
     decision TEXT NOT NULL,
     active_setup TEXT,
@@ -100,13 +110,17 @@ CREATE TABLE IF NOT EXISTS resolutions (
 
 CREATE TABLE IF NOT EXISTS price_bars (
     source TEXT NOT NULL,
+    instrument TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    contract_type TEXT NOT NULL,
+    interval TEXT NOT NULL,
     open_time_utc TEXT NOT NULL,
     open REAL NOT NULL,
     high REAL NOT NULL,
     low REAL NOT NULL,
     close REAL NOT NULL,
     imported_at_utc TEXT NOT NULL,
-    PRIMARY KEY (source, open_time_utc)
+    PRIMARY KEY (source, instrument, exchange, contract_type, interval, open_time_utc)
 );
 
 CREATE TABLE IF NOT EXISTS evaluation_runs (
@@ -143,6 +157,17 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    has_meta = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+    if has_meta:
+        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if row is not None and row[0] != SCHEMA_VERSION:
+            conn.close()
+            # A v1 journal recorded predictions with as_of = recorded_at (the
+            # timing flaw fixed in phase 5). It is left untouched and must not
+            # be mixed with v2 records.
+            raise SchemaError(
+                f"{path}: journal schema v{row[0]} is not compatible with v{SCHEMA_VERSION}. "
+                "Use a new --data-dir; the old journal is kept read-only as an archive.")
     conn.executescript(SCHEMA)
     conn.executescript(_append_only_triggers())
     conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (SCHEMA_VERSION,))

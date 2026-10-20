@@ -138,8 +138,9 @@ def _continuation(facts: Facts, state: dict, cfg: dict, d: str) -> Variant:
     ]
     if cfg["thresholds"]["require_resiliency_for_confirmation"]:
         confirmation.append(_in(
-            facts, state, "C-4", f"consumed {opp}-side liquidity did NOT replenish (needs >= 2 time-ordered "
-                                 "heatmap screenshots)", resil_field, M, {"NOT_REPLENISHED"}))
+            facts, state, "C-4", f"consumed {opp}-side liquidity did NOT visibly rebuild (qualitative comparison "
+                                 "of 2 time-ordered heatmaps with identical view settings; not L2 resiliency)",
+            resil_field, M, {"NOT_REPLENISHED"}))
     else:
         confirmation.append(_in(facts, state, "C-4", f"visible {opp}-side liquidity ahead is thin",
                                 liq_field, M, {"THIN", "NOT_VISIBLE"}))
@@ -209,8 +210,9 @@ def _failed_auction(facts: Facts, state: dict, cfg: dict, d: str) -> Variant:
     ]
     if cfg["thresholds"]["require_resiliency_for_confirmation"]:
         confirmation.append(_in(
-            facts, state, "F-4", f"{pside}-side passive liquidity at the extreme REPLENISHED after being hit "
-                                 "(needs >= 2 time-ordered heatmap screenshots)", resil_field, M, {"REPLENISHED"}))
+            facts, state, "F-4", f"{pside}-side passive liquidity at the extreme visibly rebuilt after being hit "
+                                 "(qualitative comparison of 2 time-ordered heatmaps with identical view "
+                                 "settings; not L2 resiliency)", resil_field, M, {"REPLENISHED"}))
     else:
         confirmation.append(_in(facts, state, "F-4", f"thick visible {pside}-side liquidity at the extreme",
                                 liq_field, M, {"THICK"}))

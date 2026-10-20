@@ -23,7 +23,9 @@ TIMEFRAMES = ("4H", "30M", "5M", "1M")
 GROUP_TRADE_AGGRESSION = "TRADE_AGGRESSION"   # footprint delta + CVD = same trade prints
 GROUP_AUCTION = "AUCTION_STRUCTURE"
 GROUP_VISIBLE_LIQUIDITY = "VISIBLE_LIQUIDITY"
-GROUP_RESILIENCY = "LIQUIDITY_RESILIENCY"
+# Qualitative comparison of two heatmap screenshots. This is NOT the
+# Liquidity Resiliency of the L2 literature (see lar_ofi.l2).
+GROUP_VISUAL_LIQUIDITY_CHANGE = "VISUAL_LIQUIDITY_CHANGE"
 GROUP_POSITIONING = "POSITIONING_OI"
 GROUP_LIQUIDATIONS = "LIQUIDATIONS"
 GROUP_ABSORPTION = "ABSORPTION_DERIVED"
@@ -52,6 +54,14 @@ class FieldSpec:
     allowed: tuple[str, ...] = field(default_factory=tuple)
     requires_comparison: bool = False
     enabled: bool = True
+
+    @property
+    def protocol(self) -> dict:
+        return PROTOCOL.get(self.name, {})
+
+    @property
+    def requires_window(self) -> bool:
+        return self.protocol.get("window", False)
 
 
 AUCTION_INDICATORS = ("Agg. TPO", "Agg. Session Volume Profile")
@@ -128,12 +138,12 @@ FIELDS: dict[str, FieldSpec] = {
                   "Visible resting bid-side liquidity just below price (relative heatmap intensity).",
                   allowed=_LIQ),
         FieldSpec("ask_side_after_consumption", "B", "enum", ("5M", "1M"), ("Agg. Order Book Heatmap",),
-                  GROUP_RESILIENCY,
+                  GROUP_VISUAL_LIQUIDITY_CHANGE,
                   "Comparing an EARLIER heatmap screenshot (compared_with) with this one: after ask "
                   "liquidity was consumed by buying, did visible ask liquidity rebuild?",
                   allowed=_RESIL, requires_comparison=True),
         FieldSpec("bid_side_after_consumption", "B", "enum", ("5M", "1M"), ("Agg. Order Book Heatmap",),
-                  GROUP_RESILIENCY,
+                  GROUP_VISUAL_LIQUIDITY_CHANGE,
                   "Comparing an EARLIER heatmap screenshot (compared_with) with this one: after bid "
                   "liquidity was consumed by selling, did visible bid liquidity rebuild?",
                   allowed=_RESIL, requires_comparison=True),
@@ -226,3 +236,141 @@ def field_spec(name: str) -> FieldSpec:
         return FIELDS[name]
     except KeyError:
         raise RegistryError(f"unknown observation field {name!r}") from None
+
+
+# --------------------------------------------------------------------------
+# Observation protocol (OBS-PROTOCOL-2, phase 5)
+# --------------------------------------------------------------------------
+# Every categorical reading follows a written procedure with NO invented
+# numeric thresholds. Where the distinction is not reliably visible the
+# observer must record UNKNOWN. `window=True` fields additionally require the
+# observation window (window_start_utc, window_end_utc): consecutive CLOSED
+# bars of the screenshot's timeframe, ending at the last bar closed before the
+# capture time. `quantitative_data` names the data a reliable measurement
+# would need; such fields are qualitative proxies in screenshot mode.
+
+PROTOCOL_VERSION = "OBS-PROTOCOL-2"
+
+MEASUREMENT_READ_LABEL = "READ_LABEL"              # number/text printed on the chart
+MEASUREMENT_VISUAL_POSITION = "VISUAL_POSITION"    # price vs a drawn level
+MEASUREMENT_SIGN_RULE = "SIGN_RULE"                # signs of printed values
+MEASUREMENT_BAR_EXTREME_RULE = "BAR_EXTREME_RULE"  # closes vs bar highs/lows
+MEASUREMENT_AXIS_COMPARISON = "AXIS_COMPARISON"    # start vs end value on an axis
+MEASUREMENT_QUALITATIVE = "QUALITATIVE_VISUAL"     # colour intensity / visual salience
+MEASUREMENT_DERIVED = "DERIVED_INDICATOR"          # third-party algorithm output
+
+_POSITION_UNKNOWN = "poziom nie jest narysowany/opisany albo cena jest na linii i nie da się rozstrzygnąć strony"
+
+PROTOCOL: dict[str, dict] = {
+    "last_price": {"measurement": MEASUREMENT_READ_LABEL, "window": False,
+                   "procedure": "Odczytaj etykietę bieżącej ceny na osi cen.",
+                   "unknown_when": "etykieta niewidoczna lub ucięta"},
+    "prev_vah": {"measurement": MEASUREMENT_READ_LABEL, "window": False,
+                 "procedure": "Odczytaj liczbę z etykiety VAH poprzedniej sesji/profilu.",
+                 "unknown_when": "brak etykiety liczbowej (nie szacuj z położenia na osi)"},
+    "prev_val": {"measurement": MEASUREMENT_READ_LABEL, "window": False,
+                 "procedure": "Odczytaj liczbę z etykiety VAL poprzedniej sesji/profilu.",
+                 "unknown_when": "brak etykiety liczbowej (nie szacuj z położenia na osi)"},
+    "prev_poc": {"measurement": MEASUREMENT_READ_LABEL, "window": False,
+                 "procedure": "Odczytaj liczbę z etykiety POC poprzedniej sesji/profilu.",
+                 "unknown_when": "brak etykiety liczbowej"},
+    "price_vs_prev_value_area": {
+        "measurement": MEASUREMENT_VISUAL_POSITION, "window": False,
+        "procedure": "ABOVE: etykieta bieżącej ceny wyżej niż linia VAH poprzedniego profilu; BELOW: niżej "
+                     "niż VAL; INSIDE: pomiędzy.",
+        "unknown_when": _POSITION_UNKNOWN},
+    "closed_bars_outside_value": {
+        "measurement": MEASUREMENT_VISUAL_POSITION, "window": False,
+        "procedure": "Licząc wstecz od ostatniej ZAMKNIĘTEJ świecy 30M: liczba kolejnych świec, których "
+                     "zamknięcie (korpus) leży po tej samej stronie poza poprzednim VA co bieżąca cena. "
+                     "0, jeśli ostatnia zamknięta świeca zamknęła się w VA.",
+        "unknown_when": "zamknięcie którejś z liczonych świec leży na linii VAH/VAL"},
+    "returned_inside_value": {
+        "measurement": MEASUREMENT_VISUAL_POSITION, "window": False,
+        "procedure": "YES: w tej sesji handlowano poza poprzednim VA ORAZ ostatnia zamknięta świeca 30M "
+                     "zamknęła się wewnątrz VA. NO w pozostałych przypadkach po wyjściu poza VA.",
+        "unknown_when": _POSITION_UNKNOWN},
+    "violation_side": {
+        "measurement": MEASUREMENT_VISUAL_POSITION, "window": False,
+        "procedure": "UP: w bieżącej sesji jakikolwiek knot/świeca powyżej VAH lub poprzedniego maksimum; "
+                     "DOWN: poniżej VAL/minimum; NONE: brak. Gdy naruszone obie strony — strona naruszona "
+                     "później.",
+        "unknown_when": "początek sesji nie jest widoczny na screenshocie"},
+    "price_vs_avwap": {"measurement": MEASUREMENT_VISUAL_POSITION, "window": False,
+                       "procedure": "Etykieta ceny względem linii AVWAP (punkt zakotwiczenia w notatce).",
+                       "unknown_when": _POSITION_UNKNOWN},
+    "passive_liquidity_above": {
+        "measurement": MEASUREMENT_QUALITATIVE, "window": False,
+        "procedure": "W pasie cen widocznym nad bieżącą ceną: THICK, jeśli istnieje wyraźnie jaśniejszy pas "
+                     "(poziom) niż tło tego samego screenshotu; THIN, jeśli wszystkie poziomy mają barwę tła; "
+                     "NOT_VISIBLE, jeśli brak jakiejkolwiek płynności. Porównanie TYLKO w obrębie jednego "
+                     "screenshotu (skala barw jest normalizowana per widok).",
+        "unknown_when": "nie da się wskazać pasa jaśniejszego od tła bez wahania; skala barw nasycona",
+        "quantitative_data": "rzeczywista głębokość (ilości) na poziomach arkusza z L2"},
+    "passive_liquidity_below": {
+        "measurement": MEASUREMENT_QUALITATIVE, "window": False,
+        "procedure": "Jak passive_liquidity_above, dla pasa pod bieżącą ceną.",
+        "unknown_when": "jak wyżej",
+        "quantitative_data": "rzeczywista głębokość (ilości) na poziomach arkusza z L2"},
+    "ask_side_after_consumption": {
+        "measurement": MEASUREMENT_QUALITATIVE, "window": False,
+        "procedure": "Porównaj TEN SAM poziom cenowy (ten sam wiersz osi cen) na wcześniejszym (compared_with) "
+                     "i późniejszym screenshocie heatmapy o IDENTYCZNYCH ustawieniach widoku (view_settings). "
+                     "NO_CONSUMPTION_SEEN: cena nie dotarła do pasa. Po dotarciu ceny i zniknięciu pasa: "
+                     "REPLENISHED, jeśli na późniejszym screenshocie pas na tym poziomie jest ponownie co "
+                     "najmniej tak jasny jak na wcześniejszym; NOT_REPLENISHED, jeśli poziom pozostaje barwy "
+                     "tła do prawej krawędzi. To ocena wizualna, NIE pomiar Liquidity Resiliency.",
+        "unknown_when": "różne view_settings, zmiana skali barw, poziom poza widokiem, pas częściowo jasny",
+        "quantitative_data": "strumień zdarzeń L2 (dodania/anulowania/transakcje) — MODE B"},
+    "bid_side_after_consumption": {
+        "measurement": MEASUREMENT_QUALITATIVE, "window": False,
+        "procedure": "Jak ask_side_after_consumption, dla pasa bid pod ceną.",
+        "unknown_when": "jak wyżej",
+        "quantitative_data": "strumień zdarzeń L2 (dodania/anulowania/transakcje) — MODE B"},
+    "footprint_aggression": {
+        "measurement": MEASUREMENT_SIGN_RULE, "window": True,
+        "procedure": "W oknie obserwacji odczytaj znak delty KAŻDEJ zamkniętej świecy footprint. "
+                     "BUY_DOMINANT: wszystkie dodatnie; SELL_DOMINANT: wszystkie ujemne; BALANCED: znaki "
+                     "mieszane lub zerowe. Wielkość delty nie jest oceniana.",
+        "unknown_when": "znak delty którejkolwiek świecy w oknie nieczytelny",
+        "quantitative_data": "transakcje z flagą agresora (wielkość przewagi)"},
+    "price_response_to_aggression": {
+        "measurement": MEASUREMENT_BAR_EXTREME_RULE, "window": True,
+        "procedure": "Okno = świece agresji + co najmniej jedna późniejsza zamknięta świeca. Zakres agresji = "
+                     "od najniższego minimum do najwyższego maksimum świec agresji. Dla ostatniej zamkniętej "
+                     "świecy: ADVANCED, jeśli zamknięcie leży poza zakresem w kierunku agresora; REVERSED, "
+                     "jeśli poza zakresem po przeciwnej stronie; STALLED, jeśli wewnątrz zakresu.",
+        "unknown_when": "brak zamkniętej świecy po świecach agresji; zamknięcie na krawędzi zakresu"},
+    "aggression_at_extreme": {
+        "measurement": MEASUREMENT_SIGN_RULE, "window": True,
+        "procedure": "Komórki footprint na poziomie ekstremum (maksimum dla naruszenia UP, minimum dla DOWN): "
+                     "BUY, jeśli wolumen ask (kupno agresywne) jest wydrukowany jako większy od bid; SELL "
+                     "odwrotnie; NONE, jeśli komórki nie pokazują przewagi.",
+        "unknown_when": "liczby w komórkach ekstremum nieczytelne",
+        "quantitative_data": "transakcje z flagą agresora na poziomie ceny"},
+    "price_response_at_extreme": {
+        "measurement": MEASUREMENT_BAR_EXTREME_RULE, "window": True,
+        "procedure": "Jak price_response_to_aggression, gdzie świece agresji = świece tworzące ekstremum.",
+        "unknown_when": "brak zamkniętej świecy po świecach ekstremum"},
+    "oi_change": {
+        "measurement": MEASUREMENT_AXIS_COMPARISON, "window": True,
+        "procedure": "Porównaj wartość OI na końcu okna z wartością na początku okna. FLAT tylko gdy etykiety "
+                     "osi/tooltip pokazują tę samą wartość.",
+        "unknown_when": "różnicy nie da się rozstrzygnąć na osi (nie zgaduj FLAT)",
+        "quantitative_data": "szereg czasowy OI (wielkość zmiany)"},
+    "cvd_trend": {
+        "measurement": MEASUREMENT_AXIS_COMPARISON, "window": True,
+        "procedure": "Porównaj wartość CVD na końcu i na początku okna; FLAT tylko przy tej samej wartości.",
+        "unknown_when": "różnicy nie da się rozstrzygnąć na osi (nie zgaduj FLAT)",
+        "quantitative_data": "transakcje z flagą agresora"},
+    "liquidations": {
+        "measurement": MEASUREMENT_QUALITATIVE, "window": True,
+        "procedure": "LONGS/SHORTS_LIQUIDATED: w oknie widać słupek likwidacji wyraźnie wyższy niż wszystkie "
+                     "inne słupki widoczne na tym samym screenshocie; BOTH: po obu stronach; "
+                     "NONE_SIGNIFICANT: brak takiego słupka.",
+        "unknown_when": "skala słupków nie pozwala odróżnić wyróżniającego się słupka",
+        "quantitative_data": "szereg wolumenu likwidacji (rozkład historyczny)"},
+    "absorption_signal": {"measurement": MEASUREMENT_DERIVED, "window": True,
+                          "procedure": "Przepisz sygnał wskaźnika Absorption z okna (algorytm nieznany).",
+                          "unknown_when": "brak legendy znaczenia sygnału"},
+}

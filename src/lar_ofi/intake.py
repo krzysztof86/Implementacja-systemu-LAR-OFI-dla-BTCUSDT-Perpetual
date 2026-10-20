@@ -100,8 +100,13 @@ def validate_manifest_header(manifest: dict, cfg: dict) -> list[str]:
         raise ManifestError("'screenshots' must be a list")
     issues = []
     tf = manifest.get("analysis_timeframe")
-    if tf is not None and tf not in TIMEFRAMES:
-        raise ManifestError(f"analysis_timeframe {tf!r} not in {TIMEFRAMES}")
+    micro = tuple(cfg["timeframes"]["micro"])
+    if tf is None:
+        issues.append(f"ANALYSIS_TIMEFRAME_DEFAULTED: {cfg['timeframes']['micro_decision']}")
+    elif tf not in micro:
+        # The analysis timeframe selects which micro readings may satisfy setup
+        # conditions (phase 5); a 30M/4H value would leave no decision timeframe.
+        raise ManifestError(f"analysis_timeframe {tf!r} must be one of the micro timeframes {micro}")
     platform = str(manifest.get("source_platform") or "")
     if "openmarket" not in platform.lower():
         issues.append(f"SOURCE_PLATFORM_UNVERIFIED: {platform or 'not stated'} (expected OpenMarket.xyz)")
@@ -162,13 +167,22 @@ def _check_screenshot(entry: dict, base_dir: Path, cfg: dict, import_time: datet
         flags.append("TIMESTAMP_MISSING")
     if captured is not None and captured > import_time:
         fatal.append("CAPTURED_IN_FUTURE: capture time is later than import time")
+    live = entry.get("live_feed_confirmed", False)
+    if not isinstance(live, bool):
+        fatal.append("LIVE_FEED_CONFIRMED_NOT_BOOLEAN")
+        live = False
     if last_update is None:
-        flags.append("LAST_UPDATE_UNKNOWN")
+        flags.append("LAST_UPDATE_UNKNOWN" + (" (user attests live feed)" if live else ""))
     if captured is not None and last_update is not None and last_update > captured:
         fatal.append("LAST_UPDATE_AFTER_CAPTURE: data cannot be newer than the screenshot")
     rec["captured_at_utc"] = fmt_utc(captured)
     rec["data_last_update_utc"] = fmt_utc(last_update)
     rec["notes"] = entry.get("notes", "")
+    rec["live_feed_confirmed"] = live
+    view = entry.get("view_settings")
+    if view is not None and (not isinstance(view, str) or not view.strip()):
+        fatal.append("VIEW_SETTINGS_INVALID: must be a non-empty string when given")
+    rec["view_settings"] = view.strip() if isinstance(view, str) else None
 
     path = (base_dir / entry["file"]).resolve()
     data = None
@@ -261,11 +275,12 @@ def import_dataset(conn: sqlite3.Connection, manifest_path: str | Path, cfg: dic
             screenshot_id = hashlib.sha256((dataset_id + rec["sha256"]).encode()).hexdigest()[:16]
             conn.execute(
                 "INSERT INTO screenshots(screenshot_id, dataset_id, file_name, stored_path, sha256, timeframe, "
-                "indicators_json, captured_at_utc, data_last_update_utc, chart_instrument, notes, issues_json) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "indicators_json, captured_at_utc, data_last_update_utc, chart_instrument, view_settings, "
+                "live_feed_confirmed, notes, issues_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (screenshot_id, dataset_id, rec["file_name"], f"screenshots/{stored_name}", rec["sha256"],
                  rec["timeframe"], json.dumps(rec["indicators"]), rec["captured_at_utc"],
-                 rec["data_last_update_utc"], rec["chart_instrument"], rec["notes"], json.dumps(flags)),
+                 rec["data_last_update_utc"], rec["chart_instrument"], rec["view_settings"],
+                 int(rec["live_feed_confirmed"]), rec["notes"], json.dumps(flags)),
             )
             accepted.append({"screenshot_id": screenshot_id, "file_name": rec["file_name"],
                              "timeframe": rec["timeframe"], "issues": flags})

@@ -50,6 +50,13 @@ def validate_config(cfg: dict) -> None:
         raise ConfigError("thresholds.calibrated must be a boolean")
     if cfg["thresholds"]["acceptance_min_closed_bars_30m"] < 1:
         raise ConfigError("acceptance_min_closed_bars_30m must be >= 1")
+    tfs = cfg["timeframes"]
+    if tfs["micro_decision"] not in tfs["micro"]:
+        raise ConfigError("timeframes.micro_decision must be one of timeframes.micro")
+    if not set(cfg["freshness"]["require_latest_closed_bar"]) <= {"1M", "5M", "30M", "4H"}:
+        raise ConfigError("freshness.require_latest_closed_bar accepts 1M, 5M, 30M, 4H")
+    if not 0 < cfg["evaluation"]["alpha"] < 1:
+        raise ConfigError("evaluation.alpha must be in (0, 1)")
     if cfg["freshness"]["stale_policy"] not in ("block", "exclude"):
         raise ConfigError("freshness.stale_policy must be 'block' or 'exclude'")
     for h in cfg["prediction"]["horizons_minutes"]:

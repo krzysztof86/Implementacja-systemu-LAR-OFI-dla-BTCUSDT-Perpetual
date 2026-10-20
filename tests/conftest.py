@@ -14,8 +14,14 @@ from lar_ofi.config import load_config
 from lar_ofi.db import connect
 from lar_ofi.intake import import_dataset
 from lar_ofi.observations import add_observations_from_list, build_engine_input
+from lar_ofi.registry import FIELDS
+from lar_ofi.timeutil import TIMEFRAME_SECONDS, floor_bar
 
-T0 = datetime(2026, 10, 20, 10, 0, 0, tzinfo=timezone.utc)
+# 10:09:30 UTC: inside the 30M bar opened 10:00 and the 5M bar opened 10:05,
+# so screenshots taken shortly before T0 contain the latest closed 30M/5M bars.
+T0 = datetime(2026, 10, 20, 10, 9, 30, tzinfo=timezone.utc)
+HEATMAP_VIEW = "SYNTHETIC: 5M, price range fixed, colour scale fixed"
+MARKET = {"instrument": "BTCUSDT", "exchange": "Bybit", "contract_type": "USDT_PERPETUAL"}
 
 
 def iso(dt: datetime) -> str:
@@ -36,8 +42,10 @@ STANDARD_SHOTS = {
     "ctx_4h.png": {"timeframe": "4H", "indicators": ["Agg. TPO"], "offset_s": -60},
     "auction_30m.png": {"timeframe": "30M",
                         "indicators": ["Agg. TPO", "Agg. Session Volume Profile", "Anchored VWAP"], "offset_s": -30},
-    "heat_5m_a.png": {"timeframe": "5M", "indicators": ["Agg. Order Book Heatmap"], "offset_s": -300},
-    "heat_5m_b.png": {"timeframe": "5M", "indicators": ["Agg. Order Book Heatmap"], "offset_s": -20},
+    "heat_5m_a.png": {"timeframe": "5M", "indicators": ["Agg. Order Book Heatmap"], "offset_s": -300,
+                      "view_settings": HEATMAP_VIEW},
+    "heat_5m_b.png": {"timeframe": "5M", "indicators": ["Agg. Order Book Heatmap"], "offset_s": -20,
+                      "view_settings": HEATMAP_VIEW},
     "flow_5m.png": {"timeframe": "5M", "indicators": ["Agg. Volume Footprint", "Agg. Open Interest", "Agg. CVD"],
                     "offset_s": -15},
     "conf_1m.png": {"timeframe": "1M", "indicators": ["Agg. Liquidations", "Absorption"], "offset_s": -10},
@@ -78,15 +86,28 @@ FAILED_AUCTION_SHORT_OBS = [
 ]
 
 
-def obs_items(spec, shot_ids: dict[str, str]):
+def windows_for(shots: dict, t0: datetime = T0, n_bars: int = 3) -> dict[str, tuple[str, str]]:
+    """OBS-PROTOCOL-2 window per screenshot: the last `n_bars` closed bars of
+    its timeframe before the capture time."""
+    out = {}
+    for file_name, s in shots.items():
+        # a screenshot without capture time still shows its bars; read up to t0
+        end = floor_bar(t0 + timedelta(seconds=s.get("offset_s") or 0), s["timeframe"])
+        start = end - timedelta(seconds=TIMEFRAME_SECONDS[s["timeframe"]] * n_bars)
+        out[file_name] = (iso(start), iso(end))
+    return out
+
+
+def obs_items(spec, shot_ids: dict[str, str], windows: dict | None = None):
+    windows = windows if windows is not None else windows_for(STANDARD_SHOTS)
     items = []
     for entry in spec:
         file_name, field, value = entry[:3]
         item = {"screenshot": shot_ids[file_name], "field": field, "value": value}
         if len(entry) > 3:
             item["compared_with"] = shot_ids[entry[3]]
-        if isinstance(value, dict):  # explicit item overrides
-            item = {"screenshot": shot_ids[file_name], "field": field, **value}
+        if FIELDS[field].requires_window and value != "UNKNOWN" and file_name in windows:
+            item["window_start_utc"], item["window_end_utc"] = windows[file_name]
         items.append(item)
     return items
 
@@ -114,8 +135,13 @@ class Env:
                  "chart_instrument": s.get("chart_instrument", "BTCUSDT")}
             if s.get("offset_s") is not None:
                 e["captured_at_utc"] = iso(t0 + timedelta(seconds=s["offset_s"]))
-            if s.get("last_update_offset_s") is not None:
-                e["data_last_update_utc"] = iso(t0 + timedelta(seconds=s["last_update_offset_s"]))
+                # chart data normally updated 1 s before capture unless the test overrides it
+                lu = s.get("last_update_offset_s", s["offset_s"] - 1)
+                if lu is not None:
+                    e["data_last_update_utc"] = iso(t0 + timedelta(seconds=lu))
+            for key in ("view_settings", "live_feed_confirmed"):
+                if key in s:
+                    e[key] = s[key]
             entries.append(e)
         m = {"manifest_version": 1, "instrument": "BTCUSDT", "exchange": "Bybit",
              "contract_type": "USDT_PERPETUAL", "source_platform": "OpenMarket.xyz",
@@ -135,14 +161,17 @@ class Env:
                 self.conn.execute("SELECT * FROM screenshots WHERE dataset_id=?", (dataset_id,))}
 
     def scenario(self, obs_spec, shots=None, name="m", import_time=None, t0=T0):
+        shots = STANDARD_SHOTS if shots is None else shots
         res = self.import_(self.manifest(shots, name=name, t0=t0), import_time=import_time)
         ids = self.shot_ids(res.dataset_id)
-        inserted, errors = add_observations_from_list(self.conn, res.dataset_id, obs_items(obs_spec, ids))
+        inserted, errors = add_observations_from_list(self.conn, res.dataset_id,
+                                                      obs_items(obs_spec, ids, windows_for(shots, t0)))
         assert not errors, errors
         return res.dataset_id
 
-    def engine_input(self, dataset_id, as_of=T0, previous_states=None):
-        return build_engine_input(self.conn, dataset_id, as_of=as_of, previous_states=previous_states)
+    def engine_input(self, dataset_id, decision_time=T0, previous_states=None):
+        return build_engine_input(self.conn, dataset_id, decision_time=decision_time,
+                                  previous_states=previous_states, cfg=self.cfg)
 
 
 @pytest.fixture

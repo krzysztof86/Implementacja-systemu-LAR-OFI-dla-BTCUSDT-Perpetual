@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from lar_ofi import ENGINE_VERSION
 from lar_ofi.enums import CONFLICT, UNKNOWN, DataStatus, EvidenceKind
 from lar_ofi.registry import (FIELDS, GROUP_TRADE_AGGRESSION, INDICATORS)
-from lar_ofi.timeutil import parse_utc
+from lar_ofi.timeutil import floor_bar, fmt_utc, parse_utc
 
 SCOPE_CONTEXT = "CONTEXT"
 SCOPE_AUCTION = "AUCTION"
@@ -30,6 +30,13 @@ SCOPE_MICRO = "MICRO"
 SCOPE_DERIVED = "DERIVED"
 
 HEATMAP = "Agg. Order Book Heatmap"
+
+# Micro fields used by setup conditions. They must be read on the decision
+# timeframe; another micro timeframe can only contradict them.
+GATING_MICRO_FIELDS = frozenset({
+    "footprint_aggression", "cvd_trend", "price_response_to_aggression", "aggression_at_extreme",
+    "price_response_at_extreme", "oi_change", "ask_side_after_consumption", "bid_side_after_consumption",
+    "passive_liquidity_above", "passive_liquidity_below"})
 
 
 def scope_of(timeframe: str, cfg: dict) -> str | None:
@@ -116,17 +123,19 @@ def _baseline_only_ids(inp: dict) -> set[str]:
     return referenced - with_own
 
 
-def _screen_screenshots(inp: dict, cfg: dict, as_of):
+def _screen_screenshots(inp: dict, cfg: dict, decision_time):
     fresh = cfg["freshness"]
     baseline_only = _baseline_only_ids(inp)
     # Only screenshots that carry observations can block a decision; an
     # unused screenshot is reported but contributes no data.
     data_bearing = {o["screenshot_id"] for o in inp["observations"]}
     policy = fresh["stale_policy"]
+    closed_bar_tfs = set(fresh["require_latest_closed_bar"])
     usable: dict[str, dict] = {}
     excluded: list[dict] = []
     blocking: list[str] = []
     insufficient = False
+    info: list[tuple[str, object, object]] = []  # (screenshot_id, captured, last_update)
     for shot in inp["screenshots"]:
         tf = shot["timeframe"]
         scope = scope_of(tf, cfg)
@@ -141,24 +150,17 @@ def _screen_screenshots(inp: dict, cfg: dict, as_of):
             if decision_layer:
                 insufficient = True
                 blocking.append(f"TIMESTAMP_MISSING: {shot['file_name']} ({tf}) has no capture time")
-        elif as_of is not None and captured > as_of:
+        elif decision_time is not None and captured > decision_time:
             # Data not yet available at decision time: excluded, never blocking.
             reasons.append("FUTURE_DATA: captured after the decision time")
-        elif shot["screenshot_id"] in baseline_only:
-            pass
         else:
-            stale = []
-            age = (as_of - captured).total_seconds() if as_of is not None else None
-            max_age = fresh["max_age_seconds"].get(tf)
-            if age is not None and max_age is not None and age > max_age:
-                stale.append(f"STALE: age {int(age)}s > {max_age}s allowed for {tf}")
-            if last_update is not None:
-                lag = (captured - last_update).total_seconds()
-                if lag > fresh["max_update_lag_seconds"]:
-                    stale.append(f"DATA_NOT_UPDATED: chart data {int(lag)}s older than capture")
-            reasons.extend(stale)
-            if stale and decision_layer and policy == "block":
-                blocking.extend(f"{r} ({shot['file_name']}, {tf})" for r in stale)
+            if shot["screenshot_id"] in data_bearing:
+                info.append((shot["screenshot_id"], captured, last_update))
+            if shot["screenshot_id"] not in baseline_only:
+                stale = _staleness(shot, captured, last_update, decision_time, fresh, closed_bar_tfs)
+                reasons.extend(stale)
+                if stale and decision_layer and policy == "block":
+                    blocking.extend(f"{r} ({shot['file_name']}, {tf})" for r in stale)
         if reasons:
             excluded.append({"screenshot_id": shot["screenshot_id"], "file_name": shot["file_name"],
                              "timeframe": tf, "reasons": reasons})
@@ -174,40 +176,94 @@ def _screen_screenshots(inp: dict, cfg: dict, as_of):
             skew = (stamps[-1] - stamps[0]).total_seconds()
             if skew > limit:
                 blocking.append(f"UNSYNCHRONISED: {scope} screenshots span {int(skew)}s > {limit}s")
-    return usable, excluded, blocking, insufficient
+    # data_as_of: capture time of the newest data-bearing screenshot whose
+    # observations the engine actually used. If none is usable (e.g. all
+    # stale), fall back to the newest data-bearing screenshot not after the
+    # decision time, so that journaling a WAIT on old data is still measured
+    # from that old data.
+    used = [(c, u) for sid, c, u in info if sid in usable]
+    basis = "USED_SCREENSHOTS" if used else ("DATA_BEARING_NONE_USABLE" if info else None)
+    pool = used or [(c, u) for _, c, u in info]
+    updates = [u for _, u in pool if u is not None]
+    times = {
+        "data_as_of": max(c for c, _ in pool) if pool else None,
+        "data_as_of_basis": basis,
+        "data_content_latest": max(updates) if updates else None,
+    }
+    return usable, excluded, blocking, insufficient, times
+
+
+def _staleness(shot, captured, last_update, decision_time, fresh, closed_bar_tfs) -> list[str]:
+    tf = shot["timeframe"]
+    stale = []
+    if decision_time is not None:
+        age = (decision_time - captured).total_seconds()
+        max_age = fresh["max_age_seconds"].get(tf)
+        if max_age is not None and age > max_age:
+            stale.append(f"STALE: age {int(age)}s > {max_age}s allowed for {tf}")
+        if tf in closed_bar_tfs:
+            last_close = floor_bar(decision_time, tf)
+            if captured < last_close:
+                stale.append(f"MISSING_LATEST_CLOSED_BAR: captured before the {tf} bar close at "
+                             f"{fmt_utc(last_close)}")
+    if last_update is not None:
+        lag = (captured - last_update).total_seconds()
+        if lag > fresh["max_update_lag_seconds"]:
+            stale.append(f"DATA_NOT_UPDATED: chart data {int(lag)}s older than capture")
+    elif fresh["require_update_evidence"] and not shot.get("live_feed_confirmed"):
+        # Without either signal a frozen chart would pass every age check.
+        stale.append("FRESHNESS_UNVERIFIABLE: no data_last_update_utc and no live_feed_confirmed")
+    return stale
 
 
 # --------------------------------------------------------------------------
 # 3-4: observation filtering and field resolution
 # --------------------------------------------------------------------------
 
-def _comparison_problem(obs: dict, shots_by_id: dict, cfg: dict, as_of) -> str | None:
+def _comparison_problem(obs: dict, shots_by_id: dict, cfg: dict, decision_time) -> str | None:
     later = shots_by_id.get(obs["screenshot_id"])
     earlier = shots_by_id.get(obs["compared_with_screenshot_id"] or "")
+    tag = "VISUAL_CHANGE_NOT_ASSESSABLE"
     if earlier is None:
-        return "RESILIENCY_NOT_MEASURABLE: no earlier screenshot to compare with (single snapshot)"
+        return f"{tag}: no earlier screenshot to compare with (single snapshot)"
     for s in (earlier, later):
         if HEATMAP not in s["indicators"]:
-            return f"RESILIENCY_NOT_MEASURABLE: {s['file_name']} is not an order-book heatmap"
+            return f"{tag}: {s['file_name']} is not an order-book heatmap"
         if not s["captured_at_utc"]:
-            return f"RESILIENCY_NOT_MEASURABLE: {s['file_name']} has no capture time"
+            return f"{tag}: {s['file_name']} has no capture time"
     if earlier["timeframe"] != later["timeframe"]:
-        return "RESILIENCY_NOT_MEASURABLE: compared heatmaps use different timeframes"
+        return f"{tag}: compared heatmaps use different timeframes"
+    if not earlier.get("view_settings") or earlier.get("view_settings") != later.get("view_settings"):
+        # Heatmap colour scales are normalised per view; brightness is only
+        # comparable between screenshots with identical view settings.
+        return f"{tag}: view_settings missing or different between the two heatmaps"
     t0, t1 = parse_utc(earlier["captured_at_utc"]), parse_utc(later["captured_at_utc"])
     if t0 >= t1:
-        return "RESILIENCY_NOT_MEASURABLE: compared_with must be captured EARLIER"
-    if as_of is not None and t0 > as_of:
-        return "RESILIENCY_NOT_MEASURABLE: earlier screenshot is after decision time"
+        return f"{tag}: compared_with must be captured EARLIER"
+    if decision_time is not None and t0 > decision_time:
+        return f"{tag}: earlier screenshot is after decision time"
     if (t1 - t0).total_seconds() > cfg["thresholds"]["resiliency_max_gap_seconds"]:
-        return "RESILIENCY_NOT_MEASURABLE: gap between heatmaps exceeds resiliency_max_gap_seconds"
+        return f"{tag}: gap between heatmaps exceeds resiliency_max_gap_seconds"
     return None
 
 
-def _resolve(inp: dict, cfg: dict, usable: dict, as_of):
+def _window_problem(obs: dict, shot: dict) -> str | None:
+    if not obs.get("window_end_utc") or not obs.get("window_start_utc"):
+        return "WINDOW_MISSING: reading has no observation window (OBS-PROTOCOL-2)"
+    end = parse_utc(obs["window_end_utc"])
+    expected = floor_bar(parse_utc(shot["captured_at_utc"]), shot["timeframe"])
+    if end != expected:
+        return (f"WINDOW_NOT_LATEST_CLOSED_BAR: window ends {fmt_utc(end)}, last closed "
+                f"{shot['timeframe']} bar before capture closed {fmt_utc(expected)}")
+    return None
+
+
+def _resolve(inp: dict, cfg: dict, usable: dict, decision_time):
     shots_by_id = {s["screenshot_id"]: s for s in inp["screenshots"]}
     resolved: dict[tuple[str, str], Resolved] = {}
     ignored: list[dict] = []
     obs_cfg = cfg["observations"]
+    primary_tf = inp.get("analysis_timeframe") or cfg["timeframes"]["micro_decision"]
 
     for obs in sorted(inp["observations"], key=lambda o: o["observation_id"]):
         spec = FIELDS.get(obs["field"])
@@ -236,20 +292,27 @@ def _resolve(inp: dict, cfg: dict, usable: dict, as_of):
             value, note = UNKNOWN, "UNCERTAIN reading treated as UNKNOWN by policy"
         if obs["readability"] == "UNREADABLE":
             value, note = UNKNOWN, "UNREADABLE"
-        if spec.requires_comparison and value != UNKNOWN:
-            problem = _comparison_problem(obs, shots_by_id, cfg, as_of)
+        if spec.requires_window and value != UNKNOWN:
+            problem = _window_problem(obs, shot)
             if problem:
                 value, note = UNKNOWN, problem
+        if spec.requires_comparison and value != UNKNOWN:
+            problem = _comparison_problem(obs, shots_by_id, cfg, decision_time)
+            if problem:
+                value, note = UNKNOWN, problem
+        role = "PRIMARY"
+        if scope == SCOPE_MICRO and shot["timeframe"] != primary_tf:
+            role = "SECONDARY"
         r.readings.append({"observation_id": obs["observation_id"], "screenshot_id": shot["screenshot_id"],
-                           "timeframe": shot["timeframe"], "value": value,
+                           "timeframe": shot["timeframe"], "value": value, "role": role,
                            "captured_at_utc": shot["captured_at_utc"], "note": note})
         if note:
             r.notes.append(note)
 
     for key, r in resolved.items():
-        known = [rd for rd in r.readings if rd["value"] != UNKNOWN]
         r.observation_ids = sorted(rd["observation_id"] for rd in r.readings)
         r.screenshot_ids = sorted({rd["screenshot_id"] for rd in r.readings})
+        known = [rd for rd in r.readings if rd["value"] != UNKNOWN]
         if not known:
             r.value = UNKNOWN
             continue
@@ -258,12 +321,22 @@ def _resolve(inp: dict, cfg: dict, usable: dict, as_of):
             r.value = latest["value"]
             continue
         distinct = sorted({repr(rd["value"]) for rd in known})
-        if len(distinct) == 1:
-            r.value = known[0]["value"]
-        else:
+        if len(distinct) > 1:
             r.value = CONFLICT
-            r.notes.append("readings disagree: " + ", ".join(
+            r.notes.append("readings disagree (any disagreement, also across 5M/1M, blocks): " + ", ".join(
                 f"{rd['timeframe']}#{rd['observation_id']}={rd['value']}" for rd in known))
+            continue
+        primary = [rd for rd in known if rd["role"] == "PRIMARY"]
+        secondary = [rd for rd in known if rd["role"] == "SECONDARY"]
+        if r.scope == SCOPE_MICRO and r.field in GATING_MICRO_FIELDS and not primary:
+            r.value = UNKNOWN
+            r.notes.append(f"only {secondary[0]['timeframe']} reading; setup conditions use the decision "
+                           f"timeframe {primary_tf}")
+            continue
+        r.value = known[0]["value"]
+        if primary and secondary:
+            r.notes.append(f"concordant {secondary[0]['timeframe']} reading: consistency check only, "
+                           "not counted as additional evidence")
     return resolved, ignored
 
 
@@ -423,15 +496,16 @@ def _derive(facts: Facts, cfg: dict) -> tuple[dict, list[dict]]:
         "price_response_at_extreme": facts.value("price_response_at_extreme", M),
         "passive_liquidity_above": facts.value("passive_liquidity_above", M),
         "passive_liquidity_below": facts.value("passive_liquidity_below", M),
-        "ask_side_resiliency": facts.value("ask_side_after_consumption", M),
-        "bid_side_resiliency": facts.value("bid_side_after_consumption", M),
-        "resiliency_notes": sorted(set(facts.get("ask_side_after_consumption", M).notes
+        # Qualitative two-screenshot heatmap comparison; NOT L2 Liquidity Resiliency.
+        "ask_side_visual_change": facts.value("ask_side_after_consumption", M),
+        "bid_side_visual_change": facts.value("bid_side_after_consumption", M),
+        "visual_change_notes": sorted(set(facts.get("ask_side_after_consumption", M).notes
                                        + facts.get("bid_side_after_consumption", M).notes)),
         "oi_change": facts.value("oi_change", M),
         "liquidations": facts.value("liquidations", M),
         "absorption_signal_aux": facts.value("absorption_signal", M),
         "l2_metrics": "DISABLED: no event-level L2 data in screenshot mode (OFI, queue imbalance, "
-                      "replenishment are not computed)",
+                      "Liquidity Resiliency / replenishment are not computed)",
     }
 
     # OBSERVED: every resolved field with a known value
@@ -476,9 +550,9 @@ def assess(inp: dict, cfg: dict) -> dict:
     from lar_ofi.decision import decide  # local import: decision depends on engine helpers
     from lar_ofi.setups import evaluate_setups
 
-    as_of = parse_utc(inp.get("as_of_utc")) if inp.get("as_of_utc") else None
-    usable, excluded, blocking, insufficient = _screen_screenshots(inp, cfg, as_of)
-    resolved, ignored = _resolve(inp, cfg, usable, as_of)
+    decision_time = parse_utc(inp.get("decision_time_utc")) if inp.get("decision_time_utc") else None
+    usable, excluded, blocking, insufficient, times = _screen_screenshots(inp, cfg, decision_time)
+    resolved, ignored = _resolve(inp, cfg, usable, decision_time)
     facts = Facts(resolved)
     conflicts = _consistency(facts)
     state, derived_evidence = _derive(facts, cfg)
@@ -491,9 +565,9 @@ def assess(inp: dict, cfg: dict) -> dict:
     if not inp["screenshots"]:
         data_status = DataStatus.NO_DATA
         blocking.append("NO_SCREENSHOTS")
-    elif as_of is None:
+    elif decision_time is None:
         data_status = DataStatus.INSUFFICIENT_DATA
-        blocking.append("NO_DECISION_TIME: no as-of time and no screenshot timestamps")
+        blocking.append("NO_DECISION_TIME: no decision time and no screenshot timestamps")
     elif insufficient:
         data_status = DataStatus.INSUFFICIENT_DATA
     elif not usable_decision_obs:
@@ -516,7 +590,10 @@ def assess(inp: dict, cfg: dict) -> dict:
         "analysis_timeframe": inp.get("analysis_timeframe"),
         "data_source_config": inp.get("data_source_config"),
         "regime_tag": inp.get("regime_tag"),
-        "as_of_utc": inp.get("as_of_utc"),
+        "decision_time_utc": inp.get("decision_time_utc"),
+        "data_as_of_utc": fmt_utc(times["data_as_of"]),
+        "data_as_of_basis": times["data_as_of_basis"],
+        "data_content_latest_utc": fmt_utc(times["data_content_latest"]),
         "data_status": data_status.value,
         "blocking_issues": blocking,
         "dataset_issues": inp.get("dataset_issues", []),

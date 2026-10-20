@@ -29,7 +29,7 @@ def mirror(spec, keep_oi=False):
 
 def run(env, spec, cfg=None, previous_states=None, name="m"):
     ds = env.scenario(spec, name=name)
-    return assess(env.engine_input(ds, as_of=T0, previous_states=previous_states), cfg or env.cfg)
+    return assess(env.engine_input(ds, decision_time=T0, previous_states=previous_states), cfg or env.cfg)
 
 
 def test_continuation_short_mirror(env):
@@ -92,7 +92,7 @@ def test_failed_auction_needs_replenishment_from_two_snapshots(env):
     assert a["setups"]["FAILED_AUCTION"]["state"] == "CANDIDATE_SHORT"
     assert a["decision"] == "WAIT"
     relaxed = load_config(overrides={"thresholds": {"require_resiliency_for_confirmation": False}})
-    b = assess(env.engine_input(a["dataset_id"], as_of=T0), relaxed)
+    b = assess(env.engine_input(a["dataset_id"], decision_time=T0), relaxed)
     assert b["decision"] == "SHORT"  # falls back to visible THICK ask liquidity; documented, uncalibrated
 
 
@@ -124,7 +124,7 @@ def test_disabled_layer_observations_are_ignored(env):
     shots = copy.deepcopy(STANDARD_SHOTS)
     shots["gex_30m.png"] = {"timeframe": "30M", "indicators": ["GEX"], "offset_s": -25}
     ds = env.scenario(CONTINUATION_LONG_OBS + [("gex_30m.png", "gex_sign", "NEGATIVE")], shots=shots)
-    a = assess(env.engine_input(ds, as_of=T0), env.cfg)
+    a = assess(env.engine_input(ds, decision_time=T0), env.cfg)
     assert a["decision"] == "LONG"
     assert any(i["reason"] == "LAYER_E_DISABLED" for i in a["ignored_observations"])
 

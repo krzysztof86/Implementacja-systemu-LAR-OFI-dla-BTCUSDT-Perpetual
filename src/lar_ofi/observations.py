@@ -14,8 +14,8 @@ import sqlite3
 from datetime import datetime
 
 from lar_ofi.enums import UNKNOWN, Readability
-from lar_ofi.registry import FIELDS, INDICATORS, RegistryError, check_value, field_spec
-from lar_ofi.timeutil import fmt_utc, now_utc, parse_utc
+from lar_ofi.registry import FIELDS, INDICATORS, PROTOCOL_VERSION, RegistryError, check_value, field_spec
+from lar_ofi.timeutil import TIMEFRAME_SECONDS, TimeError, floor_bar, fmt_utc, now_utc, parse_utc
 
 
 class ObservationError(ValueError):
@@ -36,7 +36,8 @@ def _screenshot(conn: sqlite3.Connection, dataset_id: str, ref: str) -> sqlite3.
 def _prepare(conn: sqlite3.Connection, dataset_id: str, screenshot: str, field_name: str, value,
              readability: str = "CLEAR", compared_with: str | None = None, source: str = "manual",
              verified: bool = True, note: str = "", supersedes: int | None = None,
-             entered_at: datetime | None = None) -> tuple:
+             entered_at: datetime | None = None, window_start: str | None = None,
+             window_end: str | None = None) -> tuple:
     """Validate one observation and return the row to insert."""
     try:
         spec = field_spec(field_name)
@@ -65,6 +66,13 @@ def _prepare(conn: sqlite3.Connection, dataset_id: str, screenshot: str, field_n
         except RegistryError as exc:
             raise ObservationError(str(exc)) from exc
 
+    w_start = w_end = None
+    if spec.requires_window and stored_value != UNKNOWN:
+        w_start, w_end = _check_window(field_name, shot, window_start, window_end)
+    elif window_start or window_end:
+        raise ObservationError(f"{field_name}: window given but the field has no observation window "
+                               "(or the value is UNKNOWN)")
+
     compared_id = None
     if spec.requires_comparison:
         if not compared_with:
@@ -87,12 +95,37 @@ def _prepare(conn: sqlite3.Connection, dataset_id: str, screenshot: str, field_n
 
     entered_at = entered_at or now_utc()
     return (dataset_id, shot["screenshot_id"], field_name, json.dumps(stored_value), readability.value,
-            compared_id, source, int(bool(verified)), fmt_utc(entered_at), note, supersedes)
+            compared_id, source, int(bool(verified)), fmt_utc(entered_at), note, fmt_utc(w_start),
+            fmt_utc(w_end), PROTOCOL_VERSION, supersedes)
+
+
+def _check_window(field_name: str, shot, window_start, window_end):
+    """OBS-PROTOCOL-2: window-based readings name the closed bars they were
+    read from, so another observer can repeat the reading on the same image."""
+    if not window_start or not window_end:
+        raise ObservationError(
+            f"{field_name}: window_start_utc and window_end_utc are required (closed bars of the "
+            f"screenshot's timeframe the reading was taken from)")
+    try:
+        start, end = parse_utc(window_start), parse_utc(window_end)
+    except TimeError as exc:
+        raise ObservationError(f"{field_name}: {exc}") from exc
+    tf = shot["timeframe"]
+    if start >= end:
+        raise ObservationError(f"{field_name}: window_start_utc must precede window_end_utc")
+    for t, name in ((start, "window_start_utc"), (end, "window_end_utc")):
+        if floor_bar(t, tf) != t:
+            raise ObservationError(f"{field_name}: {name} must lie on a {tf} bar boundary "
+                                   f"({TIMEFRAME_SECONDS[tf]} s, UTC-aligned)")
+    captured = parse_utc(shot["captured_at_utc"]) if shot["captured_at_utc"] else None
+    if captured is not None and end > captured:
+        raise ObservationError(f"{field_name}: window ends after the screenshot was captured")
+    return start, end
 
 
 _INSERT = ("INSERT INTO observations(dataset_id, screenshot_id, field, value_json, readability, "
-           "compared_with_screenshot_id, source, verified, entered_at_utc, note, supersedes_id) "
-           "VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+           "compared_with_screenshot_id, source, verified, entered_at_utc, note, window_start_utc, "
+           "window_end_utc, protocol_version, supersedes_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 
 
 def add_observation(conn: sqlite3.Connection, dataset_id: str, screenshot: str, field_name: str, value,
@@ -117,7 +150,8 @@ def add_observations_from_list(conn: sqlite3.Connection, dataset_id: str, items:
                 conn, dataset_id, item["screenshot"], item["field"], item.get("value"),
                 readability=item.get("readability", "CLEAR"), compared_with=item.get("compared_with"),
                 source=item.get("source", source), verified=item.get("verified", True),
-                note=item.get("note", ""), supersedes=item.get("supersedes")))
+                note=item.get("note", ""), supersedes=item.get("supersedes"),
+                window_start=item.get("window_start_utc"), window_end=item.get("window_end_utc")))
         except (ObservationError, KeyError) as exc:
             errors.append(f"item {i} ({item.get('field')}): {exc}")
     if errors:
@@ -148,6 +182,9 @@ def current_observations(conn: sqlite3.Connection, dataset_id: str) -> list[dict
             "verified": bool(r["verified"]),
             "entered_at_utc": r["entered_at_utc"],
             "note": r["note"] or "",
+            "window_start_utc": r["window_start_utc"],
+            "window_end_utc": r["window_end_utc"],
+            "protocol_version": r["protocol_version"],
             "supersedes_id": r["supersedes_id"],
         })
     return out
@@ -171,6 +208,8 @@ def screenshots_of(conn: sqlite3.Connection, dataset_id: str) -> list[dict]:
             "captured_at_utc": r["captured_at_utc"],
             "data_last_update_utc": r["data_last_update_utc"],
             "chart_instrument": r["chart_instrument"],
+            "view_settings": r["view_settings"],
+            "live_feed_confirmed": bool(r["live_feed_confirmed"]),
             "notes": r["notes"] or "",
             "issues": json.loads(r["issues_json"]),
         })
@@ -199,7 +238,16 @@ def observation_template(conn: sqlite3.Connection, dataset_id: str) -> list[dict
                 "readability": "CLEAR",
                 "allowed": list(spec.allowed) + [UNKNOWN] if spec.kind == "enum" else spec.kind,
                 "help": spec.description,
+                "protocol": PROTOCOL_VERSION,
+                "measurement": spec.protocol.get("measurement"),
+                "procedure": spec.protocol.get("procedure"),
+                "record_UNKNOWN_when": spec.protocol.get("unknown_when"),
             }
+            if spec.protocol.get("quantitative_data"):
+                item["reliable_measurement_needs"] = spec.protocol["quantitative_data"]
+            if spec.requires_window:
+                item["window_start_utc"] = None
+                item["window_end_utc"] = None
             if spec.requires_comparison:
                 item["compared_with"] = None
             items.append(item)
@@ -213,27 +261,30 @@ def dataset_row(conn: sqlite3.Connection, dataset_id: str) -> sqlite3.Row:
     return row
 
 
-def build_engine_input(conn: sqlite3.Connection, dataset_id: str, as_of: datetime | None = None,
-                       previous_states: dict | None = None) -> dict:
+def build_engine_input(conn: sqlite3.Connection, dataset_id: str, decision_time: datetime | None = None,
+                       previous_states: dict | None = None, cfg: dict | None = None) -> dict:
     """Snapshot of everything the engine may look at. The engine is a pure
     function of this dict and the configuration, so the dict (and its hash)
     is what the prediction journal freezes."""
     ds = dataset_row(conn, dataset_id)
     manifest = json.loads(ds["manifest_json"])
     shots = screenshots_of(conn, dataset_id)
-    if as_of is None:
+    if decision_time is None:
+        # `analyze` without an explicit time: evaluate at the latest capture.
         stamps = [parse_utc(s["captured_at_utc"]) for s in shots if s["captured_at_utc"]]
-        as_of = max(stamps) if stamps else None
+        decision_time = max(stamps) if stamps else None
+    micro_decision = manifest.get("analysis_timeframe") or (
+        cfg["timeframes"]["micro_decision"] if cfg else "5M")
     return {
         "dataset_id": dataset_id,
         "instrument": ds["instrument"],
         "exchange": ds["exchange"],
         "contract_type": ds["contract_type"],
-        "analysis_timeframe": ds["analysis_timeframe"],
+        "analysis_timeframe": micro_decision,
         "data_source_config": manifest.get("data_source_config"),
         "regime_tag": manifest.get("regime_tag"),
         "dataset_issues": json.loads(ds["issues_json"]),
-        "as_of_utc": fmt_utc(as_of),
+        "decision_time_utc": fmt_utc(decision_time),
         "screenshots": shots,
         "observations": current_observations(conn, dataset_id),
         "previous_states": previous_states or {},
